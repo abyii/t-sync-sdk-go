@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	tsyncv1 "t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
+	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
 
 	zip "github.com/abyii/zip-xxh3"
 	"google.golang.org/protobuf/proto"

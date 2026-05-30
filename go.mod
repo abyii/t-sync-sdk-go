@@ -1,4 +1,4 @@
-module t-sync-sdk-go
+module github.com/abyii/t-sync-sdk-go
 
 go 1.24.4
 

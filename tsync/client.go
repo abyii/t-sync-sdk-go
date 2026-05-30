@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	tsyncv1 "t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
+	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"

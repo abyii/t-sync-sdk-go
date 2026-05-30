@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"t-sync-sdk-go/storage_clients"
+	"github.com/abyii/t-sync-sdk-go/storage_clients"
 )
 
 // FileInfo represents basic file metadata.
