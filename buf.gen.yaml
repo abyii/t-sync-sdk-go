@@ -1,0 +1,8 @@
+version: v2
+inputs:
+  - module: buf.build/abyii/t-sync:v1.0.0
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: gen/go
+    opt:
+      - paths=source_relative
