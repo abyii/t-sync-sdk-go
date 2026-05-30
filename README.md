@@ -31,6 +31,10 @@ To keep the core `tsync` library lightweight and free of heavy external dependen
   ```go
   import _ "github.com/abyii/t-sync-sdk-go/storage_clients/oci"
   ```
+* **Generic HTTP / CDN / S3-Origin Backend**: Supported out-of-the-box with **zero** external dependencies. Supports range requests for seeking, single PUT/DELETE operations, custom request headers (for authentication, tokens, etc.), and native S3-compatible REST API multipart uploads. To enable:
+  ```go
+  import _ "github.com/abyii/t-sync-sdk-go/storage_clients/http"
+  ```
 
 ---
 
