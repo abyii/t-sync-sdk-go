@@ -1,4 +1,4 @@
-package storage_clients
+package oci
 
 import (
 	"bytes"
@@ -9,13 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abyii/t-sync-sdk-go/storage_clients"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/common/auth"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 )
 
 func init() {
-	RegisterClient("oci", func(authType, namespace string) (ObjectStorageClient, error) {
+	storage_clients.RegisterClient("oci", func(authType, namespace string) (storage_clients.ObjectStorageClient, error) {
 		return NewOCIClient(namespace, authType)
 	})
 }
@@ -99,8 +100,8 @@ func (u *OCIClient) ListBuckets(ctx context.Context, compartmentID string) ([]st
 	return buckets, nil
 }
 
-func (u *OCIClient) ListObjects(ctx context.Context, bucket, prefix string) ([]ObjectInfo, error) {
-	var objects []ObjectInfo
+func (u *OCIClient) ListObjects(ctx context.Context, bucket, prefix string) ([]storage_clients.ObjectInfo, error) {
+	var objects []storage_clients.ObjectInfo
 	var nextStartWith *string
 
 	fields := "name,size"
@@ -123,7 +124,7 @@ func (u *OCIClient) ListObjects(ctx context.Context, bucket, prefix string) ([]O
 			if o.Size != nil {
 				size = *o.Size
 			}
-			objects = append(objects, ObjectInfo{
+			objects = append(objects, storage_clients.ObjectInfo{
 				Name: *o.Name,
 				Size: size,
 			})
@@ -198,7 +199,7 @@ func (u *OCIClient) Initiate(ctx context.Context, bucket, key string) (string, e
 			return *resp.UploadId, nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return "", fmt.Errorf("initiate upload failed: %w", lastErr)
 }
@@ -226,7 +227,7 @@ func (u *OCIClient) UploadPart(ctx context.Context, bucket, key, uploadID string
 		} else {
 			lastErr = fmt.Errorf("no ETag returned")
 		}
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return "", fmt.Errorf("upload part failed: %w", lastErr)
 }
@@ -257,7 +258,7 @@ func (u *OCIClient) Complete(ctx context.Context, bucket, key, uploadID string, 
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("complete upload failed: %w", lastErr)
 }
@@ -279,7 +280,7 @@ func (u *OCIClient) PutObject(ctx context.Context, bucket, key string, data []by
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("put object failed: %w", lastErr)
 }
@@ -299,7 +300,7 @@ func (u *OCIClient) Abort(ctx context.Context, bucket, key, uploadID string) err
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("abort upload failed: %w", lastErr)
 }
@@ -317,7 +318,7 @@ func (u *OCIClient) DeleteObject(ctx context.Context, bucket, key string) error 
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("delete object failed: %w", lastErr)
 }

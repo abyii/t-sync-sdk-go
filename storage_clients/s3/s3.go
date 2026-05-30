@@ -1,4 +1,4 @@
-package storage_clients
+package s3
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abyii/t-sync-sdk-go/storage_clients"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -18,7 +19,7 @@ import (
 )
 
 func init() {
-	RegisterClient("s3", func(authType, namespace string) (ObjectStorageClient, error) {
+	storage_clients.RegisterClient("s3", func(authType, namespace string) (storage_clients.ObjectStorageClient, error) {
 		return NewS3Client(authType)
 	})
 }
@@ -78,8 +79,8 @@ func (u *S3Client) ListBuckets(ctx context.Context, compartmentID string) ([]str
 	return buckets, nil
 }
 
-func (u *S3Client) ListObjects(ctx context.Context, bucket, prefix string) ([]ObjectInfo, error) {
-	var objects []ObjectInfo
+func (u *S3Client) ListObjects(ctx context.Context, bucket, prefix string) ([]storage_clients.ObjectInfo, error) {
+	var objects []storage_clients.ObjectInfo
 	var continuationToken *string
 
 	for {
@@ -97,7 +98,7 @@ func (u *S3Client) ListObjects(ctx context.Context, bucket, prefix string) ([]Ob
 			if o.Size != nil {
 				size = *o.Size
 			}
-			objects = append(objects, ObjectInfo{
+			objects = append(objects, storage_clients.ObjectInfo{
 				Name: *o.Key,
 				Size: size,
 			})
@@ -171,7 +172,7 @@ func (u *S3Client) Initiate(ctx context.Context, bucket, key string) (string, er
 			return *resp.UploadId, nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return "", fmt.Errorf("initiate upload failed: %w", lastErr)
 }
@@ -200,7 +201,7 @@ func (u *S3Client) UploadPart(ctx context.Context, bucket, key, uploadID string,
 			lastErr = fmt.Errorf("no ETag returned")
 		}
 
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return "", fmt.Errorf("upload part failed: %w", lastErr)
 }
@@ -236,7 +237,7 @@ func (u *S3Client) Complete(ctx context.Context, bucket, key, uploadID string, e
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("complete upload failed: %w", lastErr)
 }
@@ -256,7 +257,7 @@ func (u *S3Client) PutObject(ctx context.Context, bucket, key string, data []byt
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("put object failed: %w", lastErr)
 }
@@ -274,7 +275,7 @@ func (u *S3Client) Abort(ctx context.Context, bucket, key, uploadID string) erro
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("abort upload failed: %w", lastErr)
 }
@@ -291,7 +292,7 @@ func (u *S3Client) DeleteObject(ctx context.Context, bucket, key string) error {
 			return nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(1<<uint(attempt-1)) * time.Second)
+		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("delete object failed: %w", lastErr)
 }
