@@ -10,6 +10,8 @@ Features:
 * Parallel worker engines: Parallel processing of file parts during backup uploads and concurrent extraction during restoration.
 * Atomic Writes: Restorations write to a temporary file in the destination folder before renaming atomically (`os.Rename`), ensuring failures never leave half-written corrupt files on disk.
 * Direct Protobuf presentation: Schema-driven representations (`tsyncv1.Version`, `tsyncv1.FileRecord`) are exposed directly to prevent drift.
+* Done/Total Progress callbacks: Track backup and restore progress in real-time.
+* Smart disk space checking: Verifies available space on the target path, auto-falling back to single-threaded sequential extraction when space is tight, or aborting early if the remaining space is less than the largest file in the backup.
 
 ---
 
@@ -160,6 +162,49 @@ if err != nil {
     log.Fatalf("ZIP reconstruction failed: %v", err)
 }
 ```
+
+---
+
+## Progress Reporting & Disk-Space Pre-Check
+
+Both `Backup` and `Restore` support an optional progress callback (`OnProgress`) that provides the name of the file being processed, the current `done` count, and the `total` number of files.
+
+### Backup Progress
+
+To monitor progress during a backup pass:
+
+```go
+version, err := client.Backup(ctx, srcFolder, tsync.BackupOptions{
+    Label:       "daily-backup-v1",
+    Concurrency: 4,
+    KeyID:       "vm-key-1",
+    PublicKeys:  publicKeys,
+    OnProgress: func(done, total int, path string) {
+        log.Printf("[%d/%d] Backed up: %s (%.2f%%)", done, total, path, float64(done)/float64(total)*100)
+    },
+})
+```
+
+### Restore Progress & Disk-Space-Aware Fallback
+
+During a restoration (either direct directory extraction or ZIP reconstruction), progress can be tracked similarly:
+
+```go
+err = client.Restore(ctx, version.SnowflakeId, tsync.RestoreOptions{
+    ExtractDir:  "./restored-data",
+    PrivateKey:  vmPrivateKeyBytes,
+    Concurrency: 4,
+    OnProgress: func(done, total int, path string) {
+        log.Printf("[%d/%d] Restored: %s (%.2f%%)", done, total, path, float64(done)/float64(total)*100)
+    },
+})
+```
+
+#### Smart Disk Space Pre-Checks
+
+Before performing directory extraction (`ExtractDir`), the restore engine automatically checks the available disk space on the target drive (traversing to the first existing parent folder if the path does not exist yet):
+1. **Abort Early**: If the free space is less than the size of the single largest uncompressed file in the backup, the restoration is aborted immediately with an `insufficient disk space` error.
+2. **Sequential Fallback**: If the free space is larger than the single largest file but smaller than the total required uncompressed space for all files, the engine automatically prints a warning and switches the concurrency level to `1` (sequential mode) to ensure that only a single file's space overhead is required on disk at any given time.
 
 ---
 
