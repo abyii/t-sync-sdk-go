@@ -269,6 +269,35 @@ if err != nil {
 
 ---
 
+## Best Practices
+
+To ensure high performance, security, and resource efficiency when using the T-Sync SDK, adhere to the following best practices:
+
+### 1. Selective Import of Storage Clients
+Avoid importing all storage clients. External cloud SDKs (AWS SDK and OCI SDK) add significant size and memory footprints to your binary.
+* For thin clients (e.g., restore agents run on VM instances), compile only with the required driver (e.g., `storage_clients/http` for static/CDN endpoints, or `storage_clients/s3` for AWS environments).
+* Keep your imports localized to your entry point (usually `main.go`).
+
+### 2. Tuning Backup and Restore Concurrency
+* **Network-bound environments (S3/OCI)**: Scale concurrency (e.g., `Concurrency: 4` to `8`) to parallelize HTTP requests and optimize bandwidth utilization.
+* **Local disk-bound environments**: Restrict concurrency to `2` or `4` to prevent I/O saturation.
+* **Rate Limits**: Excessive concurrency against remote APIs can trigger HTTP `429 Too Many Requests` or `503 Service Unavailable`. If rate-limiting occurs, decrease the concurrency value.
+
+### 3. Graceful Termination & Context Propagation
+Always thread a cancelable `context.Context` (with appropriate timeouts) through all API calls:
+* If a backup or restore is aborted (e.g., on `SIGTERM` or container termination), the SDK will immediately halt worker pools, abort active upload streams, and clean up temporary partial write artifacts from disk.
+
+### 4. Key Management & Crypto Password Lifecycle
+* Generate strong, cryptographically secure random passwords for each backup pass.
+* Safely wrap the password using the public key of the targeted VM.
+* Never hardcode public keys or keep private keys in plaintext config files. Use a secure vault system (e.g., AWS Secrets Manager or OCI Vault) to provision keys to your agent.
+
+### 5. Memory Management
+* The SDK operates in $O(1)$ memory by utilizing streaming writes directly to the target storage writer interface.
+* Avoid loading file contents into custom memory buffers prior to feeding them to the `Source` interface. Instead, implement a streaming `io.Reader` implementation where possible.
+
+---
+
 ## Development and Testing
 
 The SDK features comprehensive test coverage split into domain-specific test suites:

@@ -54,6 +54,11 @@ func NewOCIClient(namespace, authType string) (*OCIClient, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create instance principal provider: %v", err)
 		}
+	} else if authType == "RESOURCE_PRINCIPAL" {
+		provider, err = auth.ResourcePrincipalConfigurationProvider()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create resource principal provider: %v", err)
+		}
 	} else {
 		provider = common.DefaultConfigProvider()
 	}
