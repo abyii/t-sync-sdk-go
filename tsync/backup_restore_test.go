@@ -174,7 +174,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	metadataBytes, _ := destStore.Read(context.Background(), ".tsync")
 	var corruptMetadata tsyncv1.BackupMetadata
 	_ = proto.Unmarshal(metadataBytes, &corruptMetadata)
-	
+
 	// Corrupt file4.txt's record
 	for k, r := range corruptMetadata.Files {
 		// Find key for file4
@@ -245,7 +245,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	// 7. Single Version Mode Test
 	// Add one more file to source
 	_ = srcStore.Write(context.Background(), "file5.txt", []byte("Single version mode file"))
-	
+
 	// Record existing keys in destStore
 	existingDestFiles, _ := destStore.List(context.Background(), "")
 	existingPartCount := 0
@@ -285,7 +285,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 			partCountAfter++
 		}
 	}
-	
+
 	// The store should only contain part files referenced by v3
 	expectedPartCount := len(v3Metadata.PathToFileKey)
 	if partCountAfter != expectedPartCount {
@@ -404,8 +404,8 @@ func TestTsyncRestoreOptions(t *testing.T) {
 
 	// Restore again. Since CRC32 differs, it must overwrite.
 	err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
-		ExtractDir:  tmpDir,
-		PrivateKey:  vmPriv[:],
+		ExtractDir: tmpDir,
+		PrivateKey: vmPriv[:],
 	})
 	if err != nil {
 		t.Fatalf("restore after CRC32 mismatch failed: %v", err)
@@ -466,7 +466,7 @@ func TestTsyncEncryptedZipSource(t *testing.T) {
 	srcStore := NewMemStorage()
 	var zipBuf bytes.Buffer
 	zipw := zip.NewWriter(&zipBuf)
-	
+
 	// Generate random password
 	clearZipPass, err := GenerateZipCryptoPassword()
 	if err != nil {

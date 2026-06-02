@@ -331,7 +331,7 @@ func (h *HTTPStorageClient) UploadPart(ctx context.Context, bucket, key, uploadI
 }
 
 type CompleteMultipartUpload struct {
-	XMLName xml.Name              `xml:"CompleteMultipartUpload"`
+	XMLName xml.Name                `xml:"CompleteMultipartUpload"`
 	Parts   []CompleteMultipartPart `xml:"Part"`
 }
 

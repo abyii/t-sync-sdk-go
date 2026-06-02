@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
 
@@ -21,15 +22,18 @@ import (
 
 // RestoreOptions configures the restoration operation.
 type RestoreOptions struct {
-	ZipWriter            io.Writer // Writer for reconstructed ZIP
-	ExtractDir           string    // Local directory to extract to (if set, ZipWriter is ignored)
-	PrivateKey           []byte    // VM private key to decrypt ZIP passwords
-	NewPassword          string    // Password for the output ZIP (if empty, output ZIP is unencrypted)
-	SkipDecryptionErrors bool      // If true, bad keys/parts are skipped instead of failing the run
-	FilesToRestore       []string  // Optional list of specific files to restore
+	ZipWriter            io.Writer              // Writer for reconstructed ZIP
+	ExtractDir           string                 // Local directory to extract to (if set, ZipWriter is ignored)
+	PrivateKey           []byte                 // VM private key to decrypt ZIP passwords
+	NewPassword          string                 // Password for the output ZIP (if empty, output ZIP is unencrypted)
+	SkipDecryptionErrors bool                   // If true, bad keys/parts are skipped instead of failing the run
+	FilesToRestore       []string               // Optional list of specific files to restore
 	FilterFunc           func(path string) bool // Optional callback filter
-	Concurrency          int       // Optional concurrency level for extraction (defaults to 10)
-	NoOverwrite          bool      // If true, existing files will be skipped rather than overwritten
+	Concurrency          int                    // Optional concurrency level for extraction (defaults to 10)
+	NoOverwrite          bool                   // If true, existing files will be skipped rather than overwritten
+
+	// OnProgress is an optional callback triggered as each file restoration completes.
+	OnProgress func(done, total int, path string)
 }
 
 // ResolveVersionMap resolves a Version's path-to-key mapping by evaluating its full/delta definition.
@@ -133,6 +137,32 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 			concurrency = 10
 		}
 
+		// Perform disk space pre-check
+		ancestor := getExistingAncestor(opts.ExtractDir)
+		freeSpace, err := getFreeSpace(ancestor)
+		if err == nil {
+			var totalUncompressedSize int64
+			var maxUncompressedSize int64
+			for _, fileKey := range filteredMap {
+				if rec, ok := metadata.Files[fileKey]; ok {
+					totalUncompressedSize += rec.UncompressedSize
+					if rec.UncompressedSize > maxUncompressedSize {
+						maxUncompressedSize = rec.UncompressedSize
+					}
+				}
+			}
+
+			if int64(freeSpace) < maxUncompressedSize {
+				return fmt.Errorf("insufficient disk space: required at least %d bytes (for the largest file), but only %d bytes available", maxUncompressedSize, freeSpace)
+			}
+
+			if int64(freeSpace) < totalUncompressedSize {
+				// Switch to sequential mode (concurrency = 1) to conserve space
+				concurrency = 1
+				log.Printf("[RESTORE] Insufficient space for parallel extraction (%d bytes available, %d bytes total required). Switching to sequential mode.", freeSpace, totalUncompressedSize)
+			}
+		}
+
 		type restoreTask struct {
 			path    string
 			fileKey string
@@ -149,6 +179,9 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 		// Create a cancelable subcontext so we can abort early if a worker fails
 		workerCtx, workerCancel := context.WithCancel(ctx)
 		defer workerCancel()
+
+		var progressMu sync.Mutex
+		var progressDone int32
 
 		var wg sync.WaitGroup
 		for i := 0; i < concurrency; i++ {
@@ -277,6 +310,13 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 							return
 						}
 					}
+
+					done := atomic.AddInt32(&progressDone, 1)
+					if opts.OnProgress != nil {
+						progressMu.Lock()
+						opts.OnProgress(int(done), len(filteredMap), t.path)
+						progressMu.Unlock()
+					}
 				}
 			}()
 		}
@@ -309,6 +349,7 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 	}
 
 	zipw := zip.NewWriter(opts.ZipWriter)
+	doneCount := 0
 	for path, fileKey := range filteredMap {
 		err := func() error {
 			record, exists := metadata.Files[fileKey]
@@ -351,10 +392,19 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 		if err != nil {
 			if opts.SkipDecryptionErrors {
 				log.Printf("[RESTORE WARNING] Skipping file %q: %v", path, err)
+				doneCount++
+				if opts.OnProgress != nil {
+					opts.OnProgress(doneCount, len(filteredMap), path)
+				}
 				continue
 			}
 			zipw.Close()
 			return err
+		}
+
+		doneCount++
+		if opts.OnProgress != nil {
+			opts.OnProgress(doneCount, len(filteredMap), path)
 		}
 	}
 
@@ -377,3 +427,18 @@ func calculateFileCRC32(filePath string) (uint32, error) {
 	}
 	return h.Sum32(), nil
 }
+
+func getExistingAncestor(path string) string {
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+		parent := filepath.Dir(path)
+		if parent == path { // reached root
+			return path
+		}
+		path = parent
+	}
+}
+
+var getFreeSpace = osGetFreeSpace

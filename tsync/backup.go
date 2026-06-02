@@ -26,12 +26,15 @@ type BackupOptions struct {
 	Concurrency       int
 
 	// Cryptographic settings for unencrypted source:
-	KeyID      string             // Public key ID to use. If empty, the first key in public_keys is used.
-	PublicKeys map[string][]byte  // Maps key ID -> public key. Required if creating a new store.
+	KeyID      string            // Public key ID to use. If empty, the first key in public_keys is used.
+	PublicKeys map[string][]byte // Maps key ID -> public key. Required if creating a new store.
 
 	// Cryptographic settings for pre-encrypted source:
 	EphPublicKey      []byte
 	EncryptedPassword []byte
+
+	// OnProgress is an optional callback triggered as each file backup completes.
+	OnProgress func(done, total int, path string)
 }
 
 type countingWriter struct {
@@ -324,7 +327,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 
 						_, copyErr := io.Copy(wPart, rc)
 						rc.Close()
-						
+
 						wPartCloseErr := wPart.Close()
 						partWriterCloseErr := partWriter.Close()
 
@@ -394,7 +397,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 
 						_, copyErr := io.Copy(cw, rc)
 						rc.Close()
-						
+
 						wPartCloseErr := wPart.Close()
 						zipwCloseErr := zipw.Close()
 						partWriterCloseErr := partWriter.Close()
@@ -472,12 +475,18 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	newPathToFileKey := make(map[string]string)
 	newFilesPool := make(map[string]*tsyncv1.FileRecord)
 
+	doneCount := 0
 	for res := range resultChan {
 		if res.err != nil {
 			return nil, res.err
 		}
 		newPathToFileKey[res.path] = res.key
 		newFilesPool[res.key] = res.record
+
+		doneCount++
+		if opts.OnProgress != nil {
+			opts.OnProgress(doneCount, len(entries), res.path)
+		}
 	}
 
 	// 6. Resolve version kind (FULL vs DELTA)
@@ -556,7 +565,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	if opts.SingleVersionMode {
 		// Single Version Mode: keep only the new FULL version
 		newMetadata.Versions[strconv.FormatUint(versionID, 10)] = newVersion
-		
+
 		// In-memory files pool contains only files referenced by the new version
 		for _, key := range newPathToFileKey {
 			newMetadata.Files[key] = newFilesPool[key]

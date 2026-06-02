@@ -126,16 +126,16 @@ func (m *MemStorage) ReadRange(ctx context.Context, path string, offset, length 
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	
+
 	if offset > int64(len(data)) {
 		offset = int64(len(data))
 	}
-	
+
 	end := int64(len(data))
 	if length >= 0 && offset+length < end {
 		end = offset + length
 	}
-	
+
 	slice := data[offset:end]
 	return io.NopCloser(bytes.NewReader(slice)), nil
 }

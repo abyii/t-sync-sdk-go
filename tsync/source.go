@@ -12,10 +12,10 @@ import (
 // SourceEntry represents an individual file in a backup source.
 type SourceEntry struct {
 	Path           string
-	Size           int64     // Raw/uncompressed size in bytes
-	CompressedSize int64     // Compressed size in bytes (if known, e.g. from zip source)
+	Size           int64 // Raw/uncompressed size in bytes
+	CompressedSize int64 // Compressed size in bytes (if known, e.g. from zip source)
 	LastModified   time.Time
-	CRC32          uint32    // Original CRC32 (if known, e.g. from a zip file)
+	CRC32          uint32 // Original CRC32 (if known, e.g. from a zip file)
 
 	// Open returns a read closer for the raw, uncompressed, unencrypted content.
 	// Used when IsEncryptedRaw is false.
@@ -109,7 +109,7 @@ func (s *ZipFileSource) ListEntries(ctx context.Context) ([]SourceEntry, error) 
 	var entries []SourceEntry
 	for _, r := range ranges {
 		partRange := r
-		
+
 		entry := SourceEntry{
 			Path:           partRange.Name,
 			Size:           int64(partRange.File.UncompressedSize64),

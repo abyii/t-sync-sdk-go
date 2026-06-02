@@ -17,30 +17,30 @@ import (
 func TestZipFileSourceAndLoadStoreInfo(t *testing.T) {
 	// Create a zip file in a mock Storage
 	srcStore := NewMemStorage()
-	
+
 	// Create an unencrypted ZIP with some files
 	var zipBuf bytes.Buffer
 	zipw := zip.NewWriter(&zipBuf)
-	
+
 	w1, _ := zipw.Create("hello.txt", zip.Deflate, -1, zip.NoEncryption, "")
 	_, _ = w1.Write([]byte("hello world"))
 	w2, _ := zipw.Create("world.txt", zip.Deflate, -1, zip.NoEncryption, "")
 	_, _ = w2.Write([]byte("world hello"))
 	_ = zipw.Close()
-	
+
 	_ = srcStore.Write(context.Background(), "my-archive.zip", zipBuf.Bytes())
-	
+
 	// Open ZipFileSource
 	zipSrc := NewZipFileSource(srcStore, "my-archive.zip", false)
 	entries, err := zipSrc.ListEntries(context.Background())
 	if err != nil {
 		t.Fatalf("failed to list entries: %v", err)
 	}
-	
+
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
-	
+
 	// Verify we can read contents from entry without temp file
 	for _, entry := range entries {
 		rc, err := entry.Open()
@@ -53,12 +53,12 @@ func TestZipFileSourceAndLoadStoreInfo(t *testing.T) {
 			t.Errorf("expected 'hello world', got %q", string(data))
 		}
 	}
-	
+
 	// Backup from ZipFileSource
 	destStore := NewMemStorage()
 	client := NewClient(destStore)
 	vmPub, _, _ := box.GenerateKey(rand.Reader)
-	
+
 	_, err = client.Backup(context.Background(), zipSrc, BackupOptions{
 		Label:      "zip-backup",
 		KeyID:      "key-1",
@@ -67,13 +67,13 @@ func TestZipFileSourceAndLoadStoreInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backup failed: %v", err)
 	}
-	
+
 	// Test ReadMetadata instead of LoadStoreInfo
 	sm, err := client.ReadMetadata(context.Background())
 	if err != nil {
 		t.Fatalf("ReadMetadata failed: %v", err)
 	}
-	
+
 	if sm.StoreLabel() != "" {
 		t.Errorf("expected empty store label")
 	}

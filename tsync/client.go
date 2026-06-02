@@ -106,7 +106,7 @@ func (c *Client) DeleteVersion(ctx context.Context, versionID uint64) error {
 			if err != nil {
 				return fmt.Errorf("failed to resolve delta version %d for promotion: %w", v.SnowflakeId, err)
 			}
-			
+
 			// Overwrite delta to full
 			v.Kind = tsyncv1.VersionKind_VERSION_KIND_FULL
 			v.PathToFileKey = resolvedMap

@@ -76,7 +76,7 @@ func TestLocalStorageIntegration(t *testing.T) {
 	h := crc32.NewIEEE()
 	_, _ = h.Write([]byte("local filesystem test"))
 	fileKey = fmt.Sprintf("%08x_%d", h.Sum32(), len("local filesystem test"))
-	
+
 	// Let's log files on disk
 	entries, _ := os.ReadDir(destDir)
 	for _, entry := range entries {

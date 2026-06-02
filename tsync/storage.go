@@ -29,7 +29,7 @@ type Storage interface {
 	List(ctx context.Context, prefix string) ([]FileInfo, error)
 	OpenReader(ctx context.Context, path string) (io.ReadCloser, error)
 	OpenWriter(ctx context.Context, path string) (io.WriteCloser, error)
-	
+
 	// Size returns the file size in bytes.
 	Size(ctx context.Context, path string) (int64, error)
 	// ReadRange reads a range of bytes from the file.
@@ -95,7 +95,7 @@ func (l *LocalStorage) Delete(ctx context.Context, path string) error {
 func (l *LocalStorage) List(ctx context.Context, prefix string) ([]FileInfo, error) {
 	var files []FileInfo
 	fullPrefix := l.resolvePath(prefix)
-	
+
 	// Determine the directory to read
 	searchDir := fullPrefix
 	if !strings.HasSuffix(prefix, "/") && prefix != "" {
@@ -109,7 +109,7 @@ func (l *LocalStorage) List(ctx context.Context, prefix string) ([]FileInfo, err
 		if d.IsDir() {
 			return nil
 		}
-		
+
 		// Match prefix
 		relPath, err := filepath.Rel(l.rootDir, path)
 		if err != nil {
@@ -249,7 +249,7 @@ func (o *ObjectStorage) List(ctx context.Context, prefix string) ([]FileInfo, er
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var files []FileInfo
 	for _, obj := range objs {
 		// Strip storage prefix to return relative paths
