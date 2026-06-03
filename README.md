@@ -229,6 +229,33 @@ version, err := client.Backup(ctx, srcFolder, tsync.BackupOptions{
 })
 ```
 
+### Custom Version ID & Backup Timestamp
+
+By default, the backup engine automatically generates a random 64-bit Snowflake ID for the version and uses the current system time as the backup timestamp. You can override these by setting the `CustomVersionID` and `CustomBackupTimestamp` fields in `BackupOptions`:
+
+* **`CustomVersionID` (uint64)**: An optional custom version ID.
+  * Must be a positive 64-bit integer $\le 9223372036854775807$ (signed 64-bit maximum).
+  * Must be unique (does not already exist in the backup store).
+* **`CustomBackupTimestamp` (time.Time)**: An optional custom timestamp.
+  * Must not be in the future (allowing up to 1 hour clock skew).
+  * Must be strictly after the latest existing backup version's timestamp in the store.
+
+Example:
+
+```go
+customID := uint64(1234567890)
+customTime := time.Now().Add(-24 * time.Hour) // 24 hours ago
+
+version, err := client.Backup(ctx, srcFolder, tsync.BackupOptions{
+    Label:                 "historical-backup",
+    Concurrency:           4,
+    KeyID:                 "vm-key-1",
+    PublicKeys:            publicKeys,
+    CustomVersionID:       customID,
+    CustomBackupTimestamp: customTime,
+})
+```
+
 ---
 
 ## Detailed Core APIs

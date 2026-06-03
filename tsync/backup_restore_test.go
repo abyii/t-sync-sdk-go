@@ -657,3 +657,93 @@ func TestTsyncCompressionLevels(t *testing.T) {
 func intPtr(val int) *int {
 	return &val
 }
+
+func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
+	vmPub, _, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	srcStore := NewMemStorage()
+	_ = srcStore.Write(context.Background(), "test.txt", []byte("custom version and timestamp test content"))
+
+	destStore := NewMemStorage()
+	client := NewClient(destStore)
+
+	t1 := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+
+	// 1. Test Valid Custom Version ID and Timestamp
+	v1, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+		Label:                 "backup-v1",
+		KeyID:                 "key-1",
+		PublicKeys:            map[string][]byte{"key-1": vmPub[:]},
+		CustomVersionID:       1000,
+		CustomBackupTimestamp: t1,
+	})
+	if err != nil {
+		t.Fatalf("backup failed: %v", err)
+	}
+	if v1.SnowflakeId != 1000 {
+		t.Errorf("expected version ID 1000, got %d", v1.SnowflakeId)
+	}
+	if !v1.BackupTimestamp.AsTime().Equal(t1) {
+		t.Errorf("expected backup timestamp %v, got %v", t1, v1.BackupTimestamp.AsTime())
+	}
+
+	// 2. Test Duplicate Version ID Error
+	_, err = client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+		Label:                 "backup-duplicate",
+		KeyID:                 "key-1",
+		PublicKeys:            map[string][]byte{"key-1": vmPub[:]},
+		CustomVersionID:       1000,
+		CustomBackupTimestamp: time.Now(),
+	})
+	if err == nil {
+		t.Errorf("expected error due to duplicate version ID, but got nil")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("already exists")) {
+		t.Errorf("expected 'already exists' error, got: %v", err)
+	}
+
+	// 3. Test Out-of-bounds Version ID Error
+	_, err = client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+		Label:                 "backup-invalid-id",
+		KeyID:                 "key-1",
+		PublicKeys:            map[string][]byte{"key-1": vmPub[:]},
+		CustomVersionID:       9223372036854775808, // > 2^63 - 1
+		CustomBackupTimestamp: time.Now(),
+	})
+	if err == nil {
+		t.Errorf("expected error due to out-of-bounds version ID, but got nil")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("invalid custom version ID")) {
+		t.Errorf("expected 'invalid custom version ID' error, got: %v", err)
+	}
+
+	// 4. Test Future Custom Timestamp Error
+	_, err = client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+		Label:                 "backup-future-time",
+		KeyID:                 "key-1",
+		PublicKeys:            map[string][]byte{"key-1": vmPub[:]},
+		CustomVersionID:       2000,
+		CustomBackupTimestamp: time.Now().Add(5 * time.Hour),
+	})
+	if err == nil {
+		t.Errorf("expected error due to future timestamp, but got nil")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("is in the future")) {
+		t.Errorf("expected 'is in the future' error, got: %v", err)
+	}
+
+	// 5. Test Custom Timestamp before Latest Version Error
+	t2 := time.Now().Add(-3 * time.Hour).Truncate(time.Second) // earlier than t1
+	_, err = client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+		Label:                 "backup-past-time",
+		KeyID:                 "key-1",
+		PublicKeys:            map[string][]byte{"key-1": vmPub[:]},
+		CustomVersionID:       3000,
+		CustomBackupTimestamp: t2,
+	})
+	if err == nil {
+		t.Errorf("expected error due to timestamp before latest version, but got nil")
+	} else if !bytes.Contains([]byte(err.Error()), []byte("must be after the latest version's backup timestamp")) {
+		t.Errorf("expected 'must be after the latest version's' error, got: %v", err)
+	}
+}

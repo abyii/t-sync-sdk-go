@@ -41,6 +41,14 @@ type BackupOptions struct {
 	// If 0, it uses Store (no compression).
 	// If 1 to 9, it uses Deflate with the specified level.
 	CompressionLevel *int
+
+	// CustomVersionID specifies a custom Snowflake ID for this backup version.
+	// If 0, a new ID is generated automatically.
+	CustomVersionID uint64
+
+	// CustomBackupTimestamp specifies a custom timestamp for this backup version.
+	// If zero, the current time is used.
+	CustomBackupTimestamp time.Time
 }
 
 type countingWriter struct {
@@ -70,6 +78,18 @@ func (tw *trackingWriter) Write(p []byte) (int, error) {
 }
 
 func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions) (*tsyncv1.Version, error) {
+	// 0. Validate custom options if passed
+	if opts.CustomVersionID != 0 {
+		if opts.CustomVersionID > 9223372036854775807 {
+			return nil, fmt.Errorf("invalid custom version ID: %d (must be <= 9223372036854775807)", opts.CustomVersionID)
+		}
+	}
+	if !opts.CustomBackupTimestamp.IsZero() {
+		if opts.CustomBackupTimestamp.After(time.Now().Add(1 * time.Hour)) {
+			return nil, fmt.Errorf("custom backup timestamp %v is in the future", opts.CustomBackupTimestamp)
+		}
+	}
+
 	// Resolve compression method and level
 	compMethod := zip.Deflate
 	compLevel := 5
@@ -121,6 +141,25 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	if err == nil {
 		if err = proto.Unmarshal(tsyncBytes, &metadata); err == nil {
 			hasOldMetadata = true
+		}
+	}
+
+	if hasOldMetadata {
+		if opts.CustomVersionID != 0 {
+			if _, exists := metadata.Versions[strconv.FormatUint(opts.CustomVersionID, 10)]; exists {
+				return nil, fmt.Errorf("version ID %d already exists in the backup store", opts.CustomVersionID)
+			}
+		}
+		if !opts.CustomBackupTimestamp.IsZero() && len(metadata.Versions) > 0 {
+			var latestV *tsyncv1.Version
+			for _, v := range metadata.Versions {
+				if latestV == nil || v.BackupTimestamp.AsTime().After(latestV.BackupTimestamp.AsTime()) {
+					latestV = v
+				}
+			}
+			if latestV != nil && !opts.CustomBackupTimestamp.After(latestV.BackupTimestamp.AsTime()) {
+				return nil, fmt.Errorf("custom backup timestamp %v must be after the latest version's backup timestamp %v", opts.CustomBackupTimestamp, latestV.BackupTimestamp.AsTime())
+			}
 		}
 	}
 
@@ -560,10 +599,17 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	}
 
 	// 7. Create the new Version message
-	versionID := hashStringToUint64(strconv.FormatInt(time.Now().UnixNano(), 10))
+	versionID := opts.CustomVersionID
+	if versionID == 0 {
+		versionID = hashStringToUint64(strconv.FormatInt(time.Now().UnixNano(), 10))
+	}
+	backupTime := time.Now()
+	if !opts.CustomBackupTimestamp.IsZero() {
+		backupTime = opts.CustomBackupTimestamp
+	}
 	newVersion := &tsyncv1.Version{
 		SnowflakeId:     versionID,
-		BackupTimestamp: timestamppb.New(time.Now()),
+		BackupTimestamp: timestamppb.New(backupTime),
 		Kind:            kind,
 		Label:           opts.Label,
 	}
