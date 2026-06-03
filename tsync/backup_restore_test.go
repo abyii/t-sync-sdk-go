@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -537,4 +539,121 @@ func TestTsyncEncryptedZipSource(t *testing.T) {
 	if string(data) != "top secret data payload" {
 		t.Errorf("expected 'top secret data payload', got %q", string(data))
 	}
+}
+
+func TestTsyncCompressionLevels(t *testing.T) {
+	vmPub, vmPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	testCases := []struct {
+		name             string
+		compressionLevel *int
+		expectedMethod   uint16
+	}{
+		{
+			name:             "DefaultFallback(-1)",
+			compressionLevel: intPtr(-1),
+			expectedMethod:   zip.Deflate,
+		},
+		{
+			name:             "StoreMethod(0)",
+			compressionLevel: intPtr(0),
+			expectedMethod:   zip.Store,
+		},
+		{
+			name:             "BestCompression(9)",
+			compressionLevel: intPtr(9),
+			expectedMethod:   zip.Deflate,
+		},
+		{
+			name:             "UnsetNilDefault",
+			compressionLevel: nil,
+			expectedMethod:   zip.Deflate,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srcStore := NewMemStorage()
+			content := []byte("compression level verification content that repeats to ensure compression actually compresses something meaningful. repeating repeating repeating")
+			_ = srcStore.Write(context.Background(), "test.txt", content)
+
+			destStore := NewMemStorage()
+			client := NewClient(destStore)
+
+			// Run Backup with options
+			v, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+				Label:            "backup-run",
+				KeyID:            "key-1",
+				PublicKeys:       map[string][]byte{"key-1": vmPub[:]},
+				CompressionLevel: tc.compressionLevel,
+			})
+			if err != nil {
+				t.Fatalf("backup failed: %v", err)
+			}
+
+			// Verify underlying part uses expected method and has valid metadata
+			sm, err := client.ReadMetadata(context.Background())
+			if err != nil {
+				t.Fatalf("failed to read metadata: %v", err)
+			}
+
+			// Retrieve the first file record's fileKey and locate its part in destStore
+			var fileKey string
+			for fk := range sm.Files() {
+				fileKey = fk
+				break
+			}
+			if fileKey == "" {
+				t.Fatalf("no files found in backup metadata")
+			}
+
+			partKey := fmt.Sprintf("%s/%s", fileKey[0:2], fileKey)
+			partData, err := destStore.Read(context.Background(), partKey)
+			if err != nil {
+				t.Fatalf("failed to read part data from store: %v", err)
+			}
+
+			if len(partData) < 10 {
+				t.Fatalf("part data too short")
+			}
+			sig := binary.LittleEndian.Uint32(partData[0:4])
+			if sig != 0x04034b50 {
+				t.Fatalf("invalid local file header signature: 0x%08x", sig)
+			}
+			compMethod := binary.LittleEndian.Uint16(partData[8:10])
+			if compMethod != tc.expectedMethod {
+				t.Errorf("expected compression method %d, got %d", tc.expectedMethod, compMethod)
+			}
+
+			// Restore and verify content integrity
+			tmpDir, err := os.MkdirTemp("", "tsync-restore-level-test-*")
+			if err != nil {
+				t.Fatalf("failed to create temp dir: %v", err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+				ExtractDir: tmpDir,
+				PrivateKey: vmPriv[:],
+			})
+			if err != nil {
+				t.Fatalf("restore failed: %v", err)
+			}
+
+			restoredContent, err := os.ReadFile(filepath.Join(tmpDir, "test.txt"))
+			if err != nil {
+				t.Fatalf("failed to read restored file: %v", err)
+			}
+			if !bytes.Equal(restoredContent, content) {
+				t.Errorf("restored content does not match original")
+			}
+		})
+	}
+}
+
+func intPtr(val int) *int {
+	return &val
 }

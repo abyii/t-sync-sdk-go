@@ -3,7 +3,7 @@ module github.com/abyii/t-sync-sdk-go
 go 1.24.4
 
 require (
-	github.com/abyii/zip-xxh3 v1.9.1
+	github.com/abyii/zip-xxh3 v1.9.2
 	github.com/aws/aws-sdk-go-v2 v1.41.8
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.18
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.102.1

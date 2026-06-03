@@ -35,6 +35,12 @@ type BackupOptions struct {
 
 	// OnProgress is an optional callback triggered as each file backup completes.
 	OnProgress func(done, total int, path string)
+
+	// CompressionLevel specifies the compression level to use (from -1 to 9).
+	// If nil or -1, it defaults to Deflate with level 5.
+	// If 0, it uses Store (no compression).
+	// If 1 to 9, it uses Deflate with the specified level.
+	CompressionLevel *int
 }
 
 type countingWriter struct {
@@ -64,6 +70,23 @@ func (tw *trackingWriter) Write(p []byte) (int, error) {
 }
 
 func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions) (*tsyncv1.Version, error) {
+	// Resolve compression method and level
+	compMethod := zip.Deflate
+	compLevel := 5
+	if opts.CompressionLevel != nil {
+		lvl := *opts.CompressionLevel
+		if lvl == -1 {
+			compLevel = 5
+		} else if lvl == 0 {
+			compMethod = zip.Store
+			compLevel = 0
+		} else if lvl >= 1 && lvl <= 9 {
+			compLevel = lvl
+		} else {
+			return nil, fmt.Errorf("invalid compression level: %d (must be between -1 and 9)", lvl)
+		}
+	}
+
 	// Clean up source if it implements io.Closer
 	if closer, ok := src.(io.Closer); ok {
 		defer closer.Close()
@@ -367,7 +390,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 							encMethod = zip.StandardEncryption
 						}
 
-						wPart, err := zipw.CreateFilePartSimple(path.Base(entry.Path), zip.Deflate, -1, encMethod, clearZipPass, 0, tw)
+						wPart, err := zipw.CreateFilePartSimple(path.Base(entry.Path), compMethod, compLevel, encMethod, clearZipPass, 0, tw)
 						if err != nil {
 							zipw.Close()
 							partWriter.Close()

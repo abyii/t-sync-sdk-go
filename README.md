@@ -206,6 +206,29 @@ Before performing directory extraction (`ExtractDir`), the restore engine automa
 1. **Abort Early**: If the free space is less than the size of the single largest uncompressed file in the backup, the restoration is aborted immediately with an `insufficient disk space` error.
 2. **Sequential Fallback**: If the free space is larger than the single largest file but smaller than the total required uncompressed space for all files, the engine automatically prints a warning and switches the concurrency level to `1` (sequential mode) to ensure that only a single file's space overhead is required on disk at any given time.
 
+### Compression Configuration
+
+By default, the backup engine uses the `Deflate` compression method with a level of `5` for unencrypted sources. You can customize this by setting the `CompressionLevel` option in `BackupOptions`:
+
+* **`nil` (or `-1`)**: Defaults to `Deflate` method with level `5`.
+* **`0`**: Uses `Store` method (no compression, raw pass-through).
+* **`1` to `9`**: Uses `Deflate` method with the specified compression level (from `1` for fastest compression to `9` for best compression).
+
+Example:
+
+```go
+// Create a pointer to the compression level
+compLevel := 9 // Best compression
+
+version, err := client.Backup(ctx, srcFolder, tsync.BackupOptions{
+    Label:            "highly-compressed-backup",
+    Concurrency:      4,
+    KeyID:            "vm-key-1",
+    PublicKeys:       publicKeys,
+    CompressionLevel: &compLevel,
+})
+```
+
 ---
 
 ## Detailed Core APIs
