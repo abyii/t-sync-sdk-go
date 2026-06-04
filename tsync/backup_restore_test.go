@@ -905,4 +905,76 @@ func TestTsyncV2ValidationAndBestEffort(t *testing.T) {
 			t.Errorf("expected restore with SkipValidationErrors to succeed for missing tree node, got: %v", err)
 		}
 	})
+
+	t.Run("GC prunes metadata orphans", func(t *testing.T) {
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "a.txt", []byte("file a"))
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		_, err = client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+			Label:      "valid-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup failed: %v", err)
+		}
+
+		// Inject orphaned tree node and file record
+		pbBytes, _ := destStore.Read(context.Background(), ".tsync")
+		var metadata tsyncv2.BackupMetadata
+		_ = proto.Unmarshal(pbBytes, &metadata)
+
+		metadata.Trees["orphanedtreehash123456789012345678901234567890123456789012345"] = &tsyncv2.TreeNode{
+			Entries: []*tsyncv2.TreeEntry{
+				{
+					Name: "orphan.txt",
+					Node: &tsyncv2.TreeEntry_File{
+						File: &tsyncv2.FileLeaf{
+							Crc32:            12345,
+							UncompressedSize: 67890,
+						},
+					},
+				},
+			},
+		}
+
+		metadata.Files["00003039_67890"] = &tsyncv2.FileRecord{
+			Crc32:            12345,
+			UncompressedSize: 67890,
+		}
+
+		// Write a fake sharded file part to destStore
+		fakeOrphanKey := "00/00003039_67890"
+		_ = destStore.Write(context.Background(), fakeOrphanKey, []byte("fake part data"))
+
+		corruptPb, _ := proto.Marshal(&metadata)
+		_ = destStore.Write(context.Background(), ".tsync", corruptPb)
+
+		// Run GC
+		err = client.GC(context.Background())
+		if err != nil {
+			t.Fatalf("GC failed: %v", err)
+		}
+
+		// Read metadata back
+		pbBytes2, _ := destStore.Read(context.Background(), ".tsync")
+		var metadata2 tsyncv2.BackupMetadata
+		_ = proto.Unmarshal(pbBytes2, &metadata2)
+
+		// Verify orphans are gone from metadata
+		if _, exists := metadata2.Trees["orphanedtreehash123456789012345678901234567890123456789012345"]; exists {
+			t.Errorf("orphaned tree was not pruned by GC")
+		}
+		if _, exists := metadata2.Files["00003039_67890"]; exists {
+			t.Errorf("orphaned file record was not pruned by GC")
+		}
+
+		// Verify orphaned file part is gone from storage
+		exists, _ := destStore.Exists(context.Background(), fakeOrphanKey)
+		if exists {
+			t.Errorf("orphaned storage part was not deleted by GC")
+		}
+	})
 }

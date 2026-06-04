@@ -228,7 +228,8 @@ func walkCollect(treeHash string, trees map[string]*tsyncv2.TreeNode, liveTrees 
 }
 
 // GC performs storage-level garbage collection.
-// It deletes any file-part objects in storage that are not present in the .tsync metadata.
+// It cleans up orphaned TreeNodes and FileRecords from the metadata file itself,
+// and deletes any file-part objects in storage that are not referenced in the metadata.
 func (c *Client) GC(ctx context.Context) error {
 	pbBytes, err := c.store.Read(ctx, ".tsync")
 	if err != nil {
@@ -244,7 +245,49 @@ func (c *Client) GC(ctx context.Context) error {
 		return fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
 	}
 
-	// Compile a list of all valid file parts in metadata
+	// 1. Collect all live trees and file keys
+	liveTreeHashes := make(map[string]bool)
+	liveFileKeys := make(map[string]bool)
+
+	for _, v := range metadata.Versions {
+		err := walkCollect(v.RootTreeHash, metadata.Trees, liveTreeHashes, liveFileKeys)
+		if err != nil {
+			return fmt.Errorf("failed to collect live resources: %w", err)
+		}
+	}
+
+	// 2. GC orphaned TreeNodes from metadata
+	metadataChanged := false
+	for treeHash := range metadata.Trees {
+		if !liveTreeHashes[treeHash] {
+			delete(metadata.Trees, treeHash)
+			metadataChanged = true
+		}
+	}
+
+	// 3. GC orphaned FileRecords from metadata
+	for fileKey := range metadata.Files {
+		if !liveFileKeys[fileKey] {
+			delete(metadata.Files, fileKey)
+			metadataChanged = true
+		}
+	}
+
+	// 4. Save updated metadata if any changes were made
+	if metadataChanged {
+		metadata.LastUpdated = timestamppb.New(time.Now())
+		newPbBytes, err := proto.Marshal(&metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal updated metadata: %w", err)
+		}
+
+		err = c.store.Write(ctx, ".tsync", newPbBytes)
+		if err != nil {
+			return fmt.Errorf("failed to write updated .tsync metadata file: %w", err)
+		}
+	}
+
+	// 5. List all files in the storage and delete orphans
 	validParts := make(map[string]bool)
 	for key := range metadata.Files {
 		validParts[key] = true
