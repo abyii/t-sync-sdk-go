@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/abyii/t-sync-sdk-go/storage_clients"
+	"github.com/abyii/t-sync-sdk-go/v2/storage_clients"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/common/auth"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"

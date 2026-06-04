@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abyii/t-sync-sdk-go/storage_clients"
+	"github.com/abyii/t-sync-sdk-go/v2/storage_clients"
 )
 
 func TestHTTPStorageClient(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	tsyncv2 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v2"
+	tsyncv2 "github.com/abyii/t-sync-sdk-go/v2/gen/go/com/github/abyii/tsync/v2"
 
 	zip "github.com/abyii/zip-xxh3"
 	"google.golang.org/protobuf/proto"

@@ -1,0 +1,188 @@
+// metadata.proto
+// T-Sync Incremental ZIP Backup Standard — v1
+//
+// Defines the core domain messages:
+//   - Version      : a single backup snapshot (full or delta)
+//   - FileRecord   : encryption keys + metadata for one unique content blob
+//   - VersionKind  : discriminates full snapshots from delta snapshots
+//
+// These are separated from the root BackupMetadata message (t-sync.proto) so
+// that clients which only need to inspect individual records can import a
+// narrower surface. Both files are always published and versioned together.
+
+syntax = "proto3";
+
+package com.github.abyii.tsync.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/abyii/tsync/gen/go/v1;tsyncv1";
+
+// ---------------------------------------------------------------------------
+// VersionKind — discriminates how a Version's path map is stored.
+// ---------------------------------------------------------------------------
+enum VersionKind {
+  // Default zero value. A Version with this kind is invalid and must be
+  // rejected. Writers must always set an explicit kind.
+  VERSION_KIND_UNSPECIFIED = 0;
+
+  // The Version contains the complete path→hash map for this snapshot.
+  // path_to_hash is populated. parent_id, delta_changes, delta_deleted
+  // are all absent/zero.
+  VERSION_KIND_FULL = 1;
+
+  // The Version is stored as a diff against a single parent FULL version.
+  // parent_id identifies the parent. delta_changes and delta_deleted describe
+  // the diff. path_to_hash is absent.
+  //
+  // Resolution algorithm (single-hop only — never chain two DELTAs):
+  //   1. Fetch parent Version (must be VERSION_KIND_FULL).
+  //   2. Copy parent.path_to_hash into a working map.
+  //   3. Upsert all entries from delta_changes into the working map.
+  //   4. Delete all paths listed in delta_deleted from the working map.
+  //   5. The resulting map is the complete snapshot for this Version.
+  //
+  // Writer heuristic — prefer VERSION_KIND_FULL when:
+  //   len(delta_changes) + len(delta_deleted) >= surviving file count
+  // This naturally avoids storing 600 tombstones when 600 of 1000 files
+  // are deleted; the writer just emits a VERSION_KIND_FULL with the 400 survivors.
+  VERSION_KIND_DELTA = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Version — one backup snapshot.
+// ---------------------------------------------------------------------------
+message Version {
+
+  // Snowflake ID uniquely identifying this version. Also the map key in
+  // BackupMetadata.versions (rendered as decimal string there).
+  // Encoded as fixed64 to avoid varint overhead on a full 64-bit value.
+  fixed64 snowflake_id = 1;
+
+  // Wall-clock time at which this backup snapshot was taken.
+  google.protobuf.Timestamp backup_timestamp = 2;
+
+  // Whether this version is a full snapshot or a delta. Must not be
+  // VERSION_KIND_UNSPECIFIED; writers must always set this explicitly.
+  VersionKind kind = 3;
+
+  // VERSION_KIND_FULL only — complete map of every file path in this snapshot to the
+  // compound file key (format: <crc32_hex>_<uncompressed_size>) of its raw content.
+  //
+  // Absent when kind = VERSION_KIND_DELTA.
+  map<string, string> path_to_file_key = 4;
+
+  // VERSION_KIND_DELTA only — snowflake_id of the parent Version. The parent must:
+  //   (a) exist in BackupMetadata.versions, and
+  //   (b) have kind = VERSION_KIND_FULL.
+  // Chaining (parent is itself a VERSION_KIND_DELTA) is explicitly forbidden.
+  //
+  // Zero when kind = VERSION_KIND_FULL.
+  fixed64 parent_id = 5;
+
+  // VERSION_KIND_DELTA only — files added or modified relative to the parent snapshot.
+  // Key: file path. Value: new compound file key (format: <crc32_hex>_<uncompressed_size>).
+  //
+  // Absent when kind = VERSION_KIND_FULL.
+  map<string, string> delta_changes = 6;
+
+  // VERSION_KIND_DELTA only — file paths deleted relative to the parent snapshot.
+  // Only populated when the deletion set is small. When most files are
+  // deleted the writer emits a VERSION_KIND_FULL snapshot instead (see VersionKind.VERSION_KIND_DELTA
+  // writer heuristic above).
+  //
+  // Absent when kind = VERSION_KIND_FULL.
+  repeated string delta_deleted = 7;
+
+  // Optional human-readable tag for this version (e.g. "pre-release-v2.0").
+  // Not used during reconstruction; informational only.
+  string label = 8;
+}
+
+// ---------------------------------------------------------------------------
+// FileRecord — encryption metadata for one unique content blob.
+//
+// Keyed in BackupMetadata.files by the compound file key, which is the CRC32
+// of the raw (pre-compression, pre-encryption) content formatted as an 8-character
+// lowercase hex string combined with the uncompressed size in bytes:
+// <crc32_hex>_<uncompressed_size> (e.g. "1a2b3c4d_12345").
+//
+// Using the CRC32 already computed in the ZIP file structures avoids the need for
+// custom hashing. Combining CRC32 with the uncompressed file size practically
+// eliminates the risk of collisions.
+//
+// The corresponding object in the object store contains a ZipCrypto-encrypted
+// ZIP file part:
+//   [ Local File Header (LFH) | ZipCrypto-encrypted compressed content | Data Descriptor ]
+// The LFH and Data Descriptor are NOT encrypted, so compression method and
+// CRC-32 are readable directly from the file-part object without decryption.
+// They are not duplicated here to avoid redundancy.
+//
+// The ZipCrypto password is itself encrypted using NaCl Box (Curve25519 ECDH
+// + XSalsa20-Poly1305) and stored in this record.
+// ---------------------------------------------------------------------------
+message FileRecord {
+
+  // --- Encryption ---
+  //
+  // Encryption scheme: NaCl Box (Curve25519 ECDH + XSalsa20-Poly1305).
+  //
+  // The backup runner holds the VM's long-lived Curve25519 public key and,
+  // per file, generates a fresh ephemeral Curve25519 keypair. It derives a
+  // shared secret via ECDH(eph_private_key, vm_public_key), uses that to
+  // encrypt the ZIP password, then discards the ephemeral private key.
+  //
+  // Decryption (PyNaCl):
+  //   box = Box(vm_private_key, PublicKey(ephemeral_public_key))
+  //   zip_password = box.decrypt(encrypted_zip_password)
+  //
+  // The nonce is prepended to the ciphertext by PyNaCl automatically
+  // (wire format: 24-byte nonce || ciphertext || 16-byte Poly1305 tag).
+
+  // The ephemeral Curve25519 public key generated by the backup runner for
+  // this specific file's encryption. Raw 32 bytes (not SPKI-wrapped).
+  // Required for decryption — without this the shared secret cannot be derived.
+  bytes ephemeral_public_key = 1;
+
+  // The ZIP password encrypted via NaCl Box.
+  // Wire format: nonce (24 bytes) || ciphertext || Poly1305 tag (16 bytes).
+  // PyNaCl's Box.decrypt() handles nonce extraction automatically.
+  bytes encrypted_zip_password = 2;
+
+  // Optional. Identifies which VM keypair's public key was used for ECDH,
+  // referencing BackupMetadata.public_keys. Useful when rotating VM keypairs
+  // over time — tells the decryptor which private key to load.
+  // If you have a single permanent VM keypair, this may be left empty.
+  optional string key_id = 3;
+
+  // --- Content identity ---
+
+  // CRC32 checksum of the raw file content (pre-compression, pre-encryption),
+  // as a 32-bit fixed-width value. Same value as the first part of the compound
+  // map key in BackupMetadata.files. Stored here as fixed32 for compact binary
+  // representation and self-contained validation.
+  //
+  // Use fixed32 (not uint32) because this is a fixed-width opaque checksum,
+  // not a number to be varinted.
+  fixed32 crc32 = 4;
+
+  // --- Size metadata ---
+  // These are also present in the Data Descriptor of the file-part object.
+  // Duplicated here for fast reporting and progress estimation without
+  // fetching or decrypting any file-part objects.
+
+  // Size in bytes of the compressed (and encrypted) content in the file-part
+  // object. This is the on-disk/on-wire size of the payload.
+  int64 compressed_size = 5;
+
+  // Size in bytes of the original uncompressed file content.
+  int64 uncompressed_size = 6;
+
+  // --- Timestamps ---
+
+  // Last-modified timestamp of the source file at backup time.
+  // Full precision stored here. At ZIP reconstruction time, derive the
+  // DOS-packed last_mod_file_time (2 bytes) and last_mod_file_date (2 bytes)
+  // fields for the Central Directory entry from this value.
+  google.protobuf.Timestamp last_modified = 7;
+}

@@ -1,0 +1,246 @@
+// metadata.proto
+// T-Sync Incremental ZIP Backup Standard — v2
+//
+// Defines the core domain messages:
+//   - Version     : a single backup snapshot, identified by a root tree hash
+//   - TreeNode    : a directory node in the version tree (content-addressed)
+//   - TreeEntry   : one entry in a TreeNode (file leaf or subtree reference)
+//   - FileLeaf    : a file reference within a TreeEntry
+//   - FileRecord  : encryption keys + metadata for one unique content blob
+//
+// These are separated from the root BackupMetadata message (t-sync.proto) so
+// that clients which only need to inspect individual records can import a
+// narrower surface. Both files are always published and versioned together.
+
+syntax = "proto3";
+
+package com.github.abyii.tsync.v2;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/abyii/tsync/gen/go/v2;tsyncv2";
+
+// ---------------------------------------------------------------------------
+// Version — one backup snapshot.
+//
+// A Version does not store any file paths or hashes directly. It holds only a
+// reference to a root TreeNode via root_tree_hash. The complete file tree for
+// this version is obtained by recursively resolving TreeNodes from
+// BackupMetadata.trees starting at root_tree_hash.
+//
+// Space efficiency is structural: if a subdirectory did not change between two
+// versions, both versions reference the exact same child TreeNode hash. That
+// TreeNode is stored once in BackupMetadata.trees regardless of how many
+// versions reference it. No FULL/DELTA heuristic is needed — every version is
+// always a complete, self-sufficient snapshot resolved in one tree walk.
+// ---------------------------------------------------------------------------
+message Version {
+
+  // Snowflake ID uniquely identifying this version.
+  // Also the map key in BackupMetadata.versions (rendered as decimal string).
+  // Encoded as fixed64 to avoid varint overhead on a full 64-bit value.
+  fixed64 snowflake_id = 1;
+
+  // Wall-clock time at which this backup snapshot was taken.
+  google.protobuf.Timestamp backup_timestamp = 2;
+
+  // SHA-256 hash of the serialized root TreeNode for this version, encoded as
+  // a 64-character lowercase hex string.
+  //
+  // Resolve this version's complete file tree by looking up this hash in
+  // BackupMetadata.trees and walking the tree recursively.
+  //
+  // Two versions that share an unchanged subtree will reference the same child
+  // TreeNode hash, which is stored exactly once in BackupMetadata.trees.
+  string root_tree_hash = 3;
+
+  // Optional. Snowflake ID of the immediately preceding version, for history
+  // traversal and audit only. Not used during tree resolution — the tree is
+  // always fully resolvable from root_tree_hash alone.
+  // Zero if this is the first version in the store.
+  //
+  // Named "preceding_version_id" (not "parent_id") to distinguish from v1,
+  // where parent_id was a structural delta base. Here it is purely informational.
+  fixed64 preceding_version_id = 4;
+
+  // Optional. Human-readable label (e.g. "pre-release-v2.0").
+  // Not used during reconstruction; informational only.
+  string label = 5;
+}
+
+// ---------------------------------------------------------------------------
+// TreeNode — one directory node in the version file tree.
+//
+// Stored in BackupMetadata.trees, keyed by the SHA-256 hash of its own
+// canonical serialized bytes (64-char lowercase hex string). This content-
+// addressing means identical directory states produce the same hash and are
+// stored exactly once, shared across all versions that contain that directory.
+//
+// Canonical serialization rules (required for hash determinism):
+//   1. entries must be sorted lexicographically by entry.name before
+//      serializing. Sorting is by raw UTF-8 byte order, case-sensitive.
+//   2. Serialize using deterministic proto3 binary encoding:
+//      - No unknown fields.
+//      - Fields at their default/zero value are elided (standard proto3).
+//        A zero-byte file (crc32=0, uncompressed_size=0) produces a
+//        valid but empty FileLeaf sub-message.
+//      - Varints must use minimal-length encoding.
+//      - Map fields are not present in TreeNode, so map ordering is moot.
+//      - Reference: Go's proto.MarshalOptions{Deterministic: true} or
+//        equivalent deterministic serializer in your language.
+//   3. Compute SHA-256 over the resulting bytes. That is the map key.
+//
+// Note: an empty directory has zero entries. Its canonical serialization is
+// zero bytes, producing the well-known SHA-256 of empty input:
+//   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+// All empty directories across all versions share this one hash.
+//
+// A TreeNode represents exactly one directory level. Nested directories are
+// represented by TreeEntry.subtree_hash entries pointing to child TreeNodes.
+// ---------------------------------------------------------------------------
+message TreeNode {
+
+  // The entries in this directory, sorted lexicographically by name.
+  // Each entry is either a file leaf or a reference to a child TreeNode.
+  // Sorting is mandatory for hash determinism — writers must sort before
+  // serializing, readers may validate sort order.
+  repeated TreeEntry entries = 1;
+}
+
+// ---------------------------------------------------------------------------
+// TreeEntry — one item in a TreeNode: either a file or a subdirectory.
+// ---------------------------------------------------------------------------
+message TreeEntry {
+
+  // The name of this file or directory at this level of the tree.
+  // This is a single path component, not a full path
+  // (e.g. "main.go", not "src/main.go").
+  //
+  // Validation rules:
+  //   - Must not be empty.
+  //   - Must not contain "/" or "\".
+  //   - Must not contain null bytes (0x00).
+  //   - Must not be the literal name "." or ".." (directory traversal).
+  //     Dots within normal filenames (e.g. "main.go") are valid.
+  //   - Should not exceed 255 bytes (common filesystem limit).
+  string name = 1;
+
+  oneof node {
+    // Present if this entry is a file. References a FileRecord in
+    // BackupMetadata.files via a compound content key.
+    FileLeaf file = 2;
+
+    // Present if this entry is a subdirectory. SHA-256 hash (64-char
+    // lowercase hex) of the child TreeNode, looked up in BackupMetadata.trees.
+    string subtree_hash = 3;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FileLeaf — a file reference within a TreeEntry.
+//
+// Identifies a unique file blob via a compound content key derived from the
+// ZIP-native CRC-32 and uncompressed size. Both fields together form the key
+// into BackupMetadata.files:
+//
+//   file_key = sprintf("%08x_%d", crc32, uncompressed_size)
+//   e.g.     = "a1b2c3d4_102400"
+//
+// CRC-32 alone has a 32-bit collision space. Pairing it with uncompressed_size
+// makes accidental collisions negligible in practice: two distinct files must
+// share both an identical CRC-32 and an identical byte count to collide.
+// Both values are ZIP-native — present in every standard ZIP Data Descriptor
+// and Central Directory. No extra hashing or non-standard extra fields needed.
+// ---------------------------------------------------------------------------
+message FileLeaf {
+
+  // CRC-32 of the uncompressed file content, as stored in the ZIP Data
+  // Descriptor and Central Directory. Fixed 32-bit width; use fixed32.
+  fixed32 crc32 = 1;
+
+  // Uncompressed size in bytes of the file content, as stored in the ZIP
+  // Data Descriptor and Central Directory. Combined with crc32 to form
+  // the compound key into BackupMetadata.files.
+  int64 uncompressed_size = 2;
+}
+
+// ---------------------------------------------------------------------------
+// FileRecord — encryption metadata for one unique content blob.
+//
+// Stored in BackupMetadata.files, keyed by the compound content key:
+//   "{8-char-crc32-hex}_{uncompressed_size_decimal}"
+//   e.g. "a1b2c3d4_102400"
+//
+// The corresponding file-part object in the object store is a ZIP fragment:
+//   [ Local File Header (LFH) | ZipCrypto-encrypted compressed content | Data Descriptor ]
+//
+// The LFH and Data Descriptor are NOT encrypted. Compression method and CRC-32
+// are readable directly from the file-part object without decryption, so they
+// are not duplicated here.
+//
+// The ZipCrypto password is itself encrypted using NaCl Box
+// (Curve25519 ECDH + XSalsa20-Poly1305) and stored in this record.
+// ---------------------------------------------------------------------------
+message FileRecord {
+
+  // --- Encryption ---
+  //
+  // Encryption scheme: NaCl Box (Curve25519 ECDH + XSalsa20-Poly1305).
+  //
+  // The backup runner holds the VM's long-lived Curve25519 public key and,
+  // per file, generates a fresh ephemeral Curve25519 keypair. It derives a
+  // shared secret via ECDH(eph_private_key, vm_public_key), uses that to
+  // encrypt the ZIP password, then discards the ephemeral private key.
+  //
+  // Decryption (PyNaCl):
+  //   box = Box(vm_private_key, PublicKey(ephemeral_public_key))
+  //   zip_password = box.decrypt(encrypted_zip_password)
+  //
+  // PyNaCl prepends the 24-byte nonce to the ciphertext automatically.
+  // Wire format: nonce (24 bytes) || ciphertext || Poly1305 tag (16 bytes).
+
+  // The ephemeral Curve25519 public key generated by the backup runner for
+  // this specific file's encryption. Raw 32 bytes (not SPKI-wrapped).
+  // Required for decryption — without this the shared secret cannot be derived.
+  bytes ephemeral_public_key = 1;
+
+  // The ZipCrypto password encrypted via NaCl Box.
+  // Wire format: nonce (24 bytes) || ciphertext || Poly1305 tag (16 bytes).
+  // PyNaCl's Box.decrypt() handles nonce extraction automatically.
+  bytes encrypted_zip_password = 2;
+
+  // Optional. Identifies which VM keypair's public key was used for ECDH,
+  // referencing BackupMetadata.public_keys. Useful when rotating VM keypairs
+  // over time — tells the decryptor which private key to load.
+  // May be left empty if a single permanent VM keypair is used.
+  optional string key_id = 3;
+
+  // --- Content identity ---
+
+  // CRC-32 checksum of the raw file content (pre-compression, pre-encryption),
+  // as a 32-bit fixed-width value. Same value as the first component of the
+  // compound map key in BackupMetadata.files and FileLeaf.crc32. Stored here
+  // so that a FileRecord is self-describing without parsing its string map key.
+  // Use fixed32 (not uint32) because this is a fixed-width opaque checksum.
+  fixed32 crc32 = 4;
+
+  // --- Size metadata ---
+  // Also present in the ZIP Data Descriptor inside the file-part object.
+  // Duplicated here for fast reporting and progress estimation without
+  // fetching or decrypting any file-part objects.
+
+  // Compressed size in bytes of the content in the file-part object.
+  int64 compressed_size = 5;
+
+  // Uncompressed size in bytes. Also used as part of the compound map key.
+  // Must match FileLeaf.uncompressed_size for every leaf referencing this record.
+  int64 uncompressed_size = 6;
+
+  // --- Timestamps ---
+
+  // Last-modified timestamp of the source file at backup time.
+  // Full precision stored here. At ZIP reconstruction time, derive the
+  // DOS-packed last_mod_file_time (2 bytes) and last_mod_file_date (2 bytes)
+  // fields for the Central Directory entry from this value.
+  google.protobuf.Timestamp last_modified = 7;
+}

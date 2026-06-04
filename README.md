@@ -18,7 +18,7 @@ Features:
 ## Installation
 
 ```bash
-go get github.com/abyii/t-sync-sdk-go/tsync
+go get github.com/abyii/t-sync-sdk-go/v2/tsync
 ```
 
 ### Selective Storage Providers (AWS S3 & OCI Object Storage)
@@ -27,15 +27,15 @@ To keep the core `tsync` library lightweight and free of heavy external dependen
 * **LocalStorage & MemStorage**: Supported out-of-the-box with **zero** external cloud SDK dependencies.
 * **AWS S3 Backend**: To enable and download the S3 dependencies, add this import to your code (e.g. in `main.go`):
   ```go
-  import _ "github.com/abyii/t-sync-sdk-go/storage_clients/s3"
+  import _ "github.com/abyii/t-sync-sdk-go/v2/storage_clients/s3"
   ```
 * **OCI Object Storage Backend**: To enable and download the Oracle OCI dependencies, add this import to your code:
   ```go
-  import _ "github.com/abyii/t-sync-sdk-go/storage_clients/oci"
+  import _ "github.com/abyii/t-sync-sdk-go/v2/storage_clients/oci"
   ```
 * **Generic HTTP / CDN / S3-Origin Backend**: Supported out-of-the-box with **zero** external dependencies. Supports range requests for seeking, single PUT/DELETE operations, custom request headers (for authentication, tokens, etc.), and native S3-compatible REST API multipart uploads. To enable:
   ```go
-  import _ "github.com/abyii/t-sync-sdk-go/storage_clients/http"
+  import _ "github.com/abyii/t-sync-sdk-go/v2/storage_clients/http"
   ```
 
 ---
@@ -52,7 +52,7 @@ import (
 	"context"
 	"log"
 	
-	"github.com/abyii/t-sync-sdk-go/tsync"
+	"github.com/abyii/t-sync-sdk-go/v2/tsync"
 )
 
 func main() {

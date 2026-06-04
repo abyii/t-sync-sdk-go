@@ -1,0 +1,72 @@
+// t_sync.proto
+// T-Sync Incremental ZIP Backup Standard — v1
+//
+// Defines the top-level BackupMetadata message: the single serialized blob
+// that fully describes a T-Sync backup store. A conforming implementation
+// must be able to reconstruct any versioned ZIP archive solely from this
+// metadata plus the corresponding encrypted file-part objects (one per unique
+// content hash) stored in the object store.
+//
+// Wire format: proto3 binary, written as a length-prefixed stream or a plain
+// serialized file. The file extension is ".tsync".
+//
+// Compatibility promise:
+//   Within v1, field numbers and types are frozen. New optional fields may be
+//   added (patch/minor bumps). Removals or type changes require a v2 package.
+//   See docs/compatibility.md for the full policy.
+
+syntax = "proto3";
+
+package com.github.abyii.tsync.v1;
+
+import "com/github/abyii/tsync/v1/metadata.proto";
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/abyii/tsync/gen/go/v1;tsyncv1";
+
+// ---------------------------------------------------------------------------
+// BackupMetadata — root message, the single serialized ".tsync" file.
+// ---------------------------------------------------------------------------
+message BackupMetadata {
+
+  // All backup versions known to this store, keyed by snowflake_id rendered
+  // as a decimal string (proto map keys must be strings or integers; decimal
+  // string keeps it human-readable in JSON transcoding).
+  //
+  // Invariant: every Version whose kind = VERSION_KIND_DELTA must have its parent_id
+  // present as a key here, and that parent must have kind = VERSION_KIND_FULL. Chains
+  // (delta → delta → full) are forbidden and must be rejected on read.
+  map<string, com.github.abyii.tsync.v1.Version> versions = 1;
+
+  // Content-addressable file records, keyed by the compound file key, which is
+  // the CRC32 of the raw (pre-compression, pre-encryption) content formatted as an
+  // 8-character lowercase hex string combined with the uncompressed size in bytes:
+  // <crc32_hex>_<uncompressed_size> (e.g. "1a2b3c4d_12345").
+  //
+  // One entry exists per unique content blob across all versions. Entries are
+  // reference-counted implicitly: a record may be removed only when no live
+  // version's path map references its key (GC responsibility of the writer).
+  map<string, com.github.abyii.tsync.v1.FileRecord> files = 2;
+
+  // VM long-lived Curve25519 public keys, keyed by key_id.
+  // Values are raw 32-byte Curve25519 public keys as used by NaCl/libsodium
+  // (not SPKI-wrapped — just the raw bytes from nacl.public.PublicKey).
+  //
+  // Optional — only needed if you use key_id in FileRecord (e.g. for key
+  // rotation). If you have a single permanent VM keypair, this map may be
+  // empty and the public key managed out-of-band.
+  map<string, bytes> public_keys = 3;
+
+  // Schema version of this file. Always "1" for messages in this package.
+  // Writers must set this. Readers should reject files with an unrecognised
+  // schema_version rather than silently misinterpret them.
+  uint32 schema_version = 4;
+
+  // Optional. Human-readable label for this backup store (e.g. "my-project-backup").
+  // Not used during reconstruction; informational only.
+  optional string store_label = 5;
+
+  // When this metadata file was last written/updated.
+  google.protobuf.Timestamp last_updated = 6;
+}

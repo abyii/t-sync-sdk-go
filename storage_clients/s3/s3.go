@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/abyii/t-sync-sdk-go/storage_clients"
+	"github.com/abyii/t-sync-sdk-go/v2/storage_clients"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
