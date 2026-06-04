@@ -1,6 +1,6 @@
 version: v2
 inputs:
-  - module: buf.build/abyii/t-sync:v1.0.0
+  - module: buf.build/abyii/t-sync
 plugins:
   - remote: buf.build/protocolbuffers/go
     out: gen/go

@@ -9,7 +9,7 @@ Features:
 * Bounded O(1) memory consumption: Uses direct, backpressured stream copies rather than loading entire files or part buffers into memory.
 * Parallel worker engines: Parallel processing of file parts during backup uploads and concurrent extraction during restoration.
 * Atomic Writes: Restorations write to a temporary file in the destination folder before renaming atomically (`os.Rename`), ensuring failures never leave half-written corrupt files on disk.
-* Direct Protobuf presentation: Schema-driven representations (`tsyncv1.Version`, `tsyncv1.FileRecord`) are exposed directly to prevent drift.
+* Direct Protobuf presentation: Schema-driven representations (`tsyncv2.Version`, `tsyncv2.FileRecord`) are exposed directly to prevent drift.
 * Done/Total Progress callbacks: Track backup and restore progress in real-time.
 * Smart disk space checking: Verifies available space on the target path, auto-falling back to single-threaded sequential extraction when space is tight, or aborting early if the remaining space is less than the largest file in the backup.
 
@@ -137,6 +137,7 @@ err = client.Restore(ctx, version.SnowflakeId, tsync.RestoreOptions{
     Concurrency:          4,                 // Concurrently extract files
     NoOverwrite:          false,             // Set true to skip overwrite checks entirely
     SkipDecryptionErrors: false,
+    SkipValidationErrors: false,             // Set true to log warnings and skip corrupt parts of the tree instead of failing
 })
 if err != nil {
     log.Fatalf("Restore failed: %v", err)
@@ -300,9 +301,9 @@ if err != nil {
 _ = sm.Reload(ctx)
 
 // Query structures directly
-latestVersion := sm.LatestVersion() // Returns *tsyncv1.Version
-registeredFiles := sm.Files()       // Returns map[string]*tsyncv1.FileRecord
-versionsList := sm.Versions()       // Returns []*tsyncv1.Version sorted by time desc
+latestVersion := sm.LatestVersion() // Returns *tsyncv2.Version
+registeredFiles := sm.Files()       // Returns map[string]*tsyncv2.FileRecord
+versionsList := sm.Versions()       // Returns []*tsyncv2.Version sorted by time desc
 ```
 
 ---

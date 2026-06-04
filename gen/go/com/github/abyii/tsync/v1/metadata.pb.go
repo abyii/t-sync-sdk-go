@@ -251,9 +251,7 @@ func (x *Version) GetLabel() string {
 //
 // The corresponding object in the object store contains a ZipCrypto-encrypted
 // ZIP file part:
-//
-//	[ Local File Header (LFH) | ZipCrypto-encrypted compressed content | Data Descriptor ]
-//
+//   [ Local File Header (LFH) | ZipCrypto-encrypted compressed content | Data Descriptor ]
 // The LFH and Data Descriptor are NOT encrypted, so compression method and
 // CRC-32 are readable directly from the file-part object without decryption.
 // They are not duplicated here to avoid redundancy.
