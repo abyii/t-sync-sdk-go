@@ -89,8 +89,7 @@ func TestLocalStorageIntegration(t *testing.T) {
 		}
 	}
 
-	t.Logf("Expected fileKey: %s", fileKey)
-	t.Logf("Version path map: %v", v.PathToFileKey)
+	t.Logf("Version RootTreeHash: %s", v.RootTreeHash)
 
 	partPath := filepath.Join(destDir, fileKey[0:2], fileKey)
 	if _, err := os.Stat(partPath); err != nil {

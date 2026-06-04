@@ -3,6 +3,8 @@ package tsync
 import (
 	"compress/flate"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -14,7 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
+	tsyncv2 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v2"
 
 	zip "github.com/abyii/zip-xxh3"
 	"google.golang.org/protobuf/proto"
@@ -27,6 +29,7 @@ type RestoreOptions struct {
 	PrivateKey           []byte                 // VM private key to decrypt ZIP passwords
 	NewPassword          string                 // Password for the output ZIP (if empty, output ZIP is unencrypted)
 	SkipDecryptionErrors bool                   // If true, bad keys/parts are skipped instead of failing the run
+	SkipValidationErrors bool                   // If true, metadata validation errors are logged as warnings and skipped, rather than failing the run
 	FilesToRestore       []string               // Optional list of specific files to restore
 	FilterFunc           func(path string) bool // Optional callback filter
 	Concurrency          int                    // Optional concurrency level for extraction (defaults to 10)
@@ -36,55 +39,124 @@ type RestoreOptions struct {
 	OnProgress func(done, total int, path string)
 }
 
-// ResolveVersionMap resolves a Version's path-to-key mapping by evaluating its full/delta definition.
-func ResolveVersionMap(metadata *tsyncv1.BackupMetadata, versionID uint64) (map[string]string, error) {
+// ResolveVersionMap resolves a Version's path-to-key mapping by walking the directory tree.
+func ResolveVersionMap(metadata *tsyncv2.BackupMetadata, versionID uint64) (map[string]string, error) {
+	return ResolveVersionMapWithOptions(metadata, versionID, false)
+}
+
+// ResolveVersionMapWithOptions resolves a Version's path-to-key mapping with optional best-effort validation skipping.
+func ResolveVersionMapWithOptions(metadata *tsyncv2.BackupMetadata, versionID uint64, skipValidationErrors bool) (map[string]string, error) {
 	vStr := strconv.FormatUint(versionID, 10)
 	version, exists := metadata.Versions[vStr]
 	if !exists {
 		return nil, fmt.Errorf("version %d not found in backup metadata", versionID)
 	}
 
-	if version.Kind == tsyncv1.VersionKind_VERSION_KIND_UNSPECIFIED {
-		return nil, fmt.Errorf("version %d has unspecified kind", versionID)
+	result := make(map[string]string)
+	err := walkTree(version.RootTreeHash, "", metadata.Trees, skipValidationErrors, result)
+	if err != nil {
+		return nil, err
 	}
+	return result, nil
+}
 
-	if version.Kind == tsyncv1.VersionKind_VERSION_KIND_FULL {
-		// Copy and return the full map
-		res := make(map[string]string)
-		for k, v := range version.PathToFileKey {
-			res[k] = v
-		}
-		return res, nil
-	}
-
-	// DELTA version must resolve against parent (which must be FULL)
-	parentStr := strconv.FormatUint(version.ParentId, 10)
-	parent, exists := metadata.Versions[parentStr]
+func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode, skipValidationErrors bool, result map[string]string) error {
+	node, exists := trees[treeHash]
 	if !exists {
-		return nil, fmt.Errorf("parent version %d of delta version %d not found", version.ParentId, versionID)
+		err := fmt.Errorf("tree node %s not found in metadata trees map", treeHash)
+		if skipValidationErrors {
+			log.Printf("[RESTORE WARNING] Skipping missing tree node %s at path %q: %v", treeHash, prefix, err)
+			return nil
+		}
+		return err
 	}
 
-	if parent.Kind != tsyncv1.VersionKind_VERSION_KIND_FULL {
-		return nil, fmt.Errorf("invalid delta parent: parent version %d must be FULL, but got kind %v", version.ParentId, parent.Kind)
+	// 1. Verify tree node hash matches its key
+	marshaled, err := proto.MarshalOptions{Deterministic: true}.Marshal(node)
+	if err != nil {
+		err2 := fmt.Errorf("failed to marshal tree node for hash verification: %w", err)
+		if skipValidationErrors {
+			log.Printf("[RESTORE WARNING] Skipping unmarshalable tree node %s at path %q: %v", treeHash, prefix, err2)
+			return nil
+		}
+		return err2
+	}
+	h := sha256.New()
+	h.Write(marshaled)
+	computedHash := hex.EncodeToString(h.Sum(nil))
+	if computedHash != treeHash {
+		err2 := fmt.Errorf("tree node hash mismatch: map key is %s, but computed hash is %s", treeHash, computedHash)
+		if skipValidationErrors {
+			log.Printf("[RESTORE WARNING] Skipping hash-mismatched tree node %s at path %q: %v", treeHash, prefix, err2)
+			return nil
+		}
+		return err2
 	}
 
-	// Start with parent map
-	res := make(map[string]string)
-	for k, v := range parent.PathToFileKey {
-		res[k] = v
+	// 2. Verify sorted order of entries
+	var prevName string
+	for i, entry := range node.Entries {
+		if i > 0 && entry.Name <= prevName {
+			err2 := fmt.Errorf("tree node %s is not sorted: %q comes after %q", treeHash, entry.Name, prevName)
+			if skipValidationErrors {
+				log.Printf("[RESTORE WARNING] Tree node %s at path %q is not sorted: %v. Continuing...", treeHash, prefix, err2)
+				break // stop order check, but continue walking entries anyway
+			}
+			return err2
+		}
+		prevName = entry.Name
 	}
 
-	// Apply delta modifications
-	for k, v := range version.DeltaChanges {
-		res[k] = v
-	}
+	// 3. Walk entries
+	for _, entry := range node.Entries {
+		if err := validateName(entry.Name); err != nil {
+			if skipValidationErrors {
+				log.Printf("[RESTORE WARNING] Skipping entry with invalid name in tree node %s: %v", treeHash, err)
+				continue
+			}
+			return fmt.Errorf("invalid name %q in tree entry: %w", entry.Name, err)
+		}
 
-	// Apply delta deletions
-	for _, k := range version.DeltaDeleted {
-		delete(res, k)
-	}
+		fullPath := entry.Name
+		if prefix != "" {
+			fullPath = prefix + "/" + entry.Name
+		}
 
-	return res, nil
+		switch n := entry.Node.(type) {
+		case *tsyncv2.TreeEntry_File:
+			if n.File == nil {
+				err2 := fmt.Errorf("file leaf is nil for entry %s", entry.Name)
+				if skipValidationErrors {
+					log.Printf("[RESTORE WARNING] Skipping entry %s in tree node %s: %v", entry.Name, treeHash, err2)
+					continue
+				}
+				return err2
+			}
+			fileKey := fmt.Sprintf("%08x_%d", n.File.Crc32, n.File.UncompressedSize)
+			result[fullPath] = fileKey
+		case *tsyncv2.TreeEntry_SubtreeHash:
+			if n.SubtreeHash == "" {
+				err2 := fmt.Errorf("subtree hash is empty for entry %s", entry.Name)
+				if skipValidationErrors {
+					log.Printf("[RESTORE WARNING] Skipping entry %s in tree node %s: %v", entry.Name, treeHash, err2)
+					continue
+				}
+				return err2
+			}
+			err := walkTree(n.SubtreeHash, fullPath, trees, skipValidationErrors, result)
+			if err != nil {
+				return err
+			}
+		default:
+			err2 := fmt.Errorf("tree entry %s has no node type set", entry.Name)
+			if skipValidationErrors {
+				log.Printf("[RESTORE WARNING] Skipping entry %s in tree node %s: %v", entry.Name, treeHash, err2)
+				continue
+			}
+			return err2
+		}
+	}
+	return nil
 }
 
 // RunRestore performs the ZIP reconstruction or extraction.
@@ -95,13 +167,17 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 		return fmt.Errorf("failed to read .tsync metadata file: %w", err)
 	}
 
-	var metadata tsyncv1.BackupMetadata
+	var metadata tsyncv2.BackupMetadata
 	if err := proto.Unmarshal(metadataBytes, &metadata); err != nil {
 		return fmt.Errorf("failed to unmarshal .tsync metadata: %w", err)
 	}
 
+	if metadata.SchemaVersion != 2 {
+		return fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
+	}
+
 	// 2. Resolve the version file map
-	resolvedMap, err := ResolveVersionMap(&metadata, versionID)
+	resolvedMap, err := ResolveVersionMapWithOptions(&metadata, versionID, opts.SkipValidationErrors)
 	if err != nil {
 		return fmt.Errorf("failed to resolve version map: %w", err)
 	}

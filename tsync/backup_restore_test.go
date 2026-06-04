@@ -10,15 +10,20 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
+	tsyncv2 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v2"
 
 	zip "github.com/abyii/zip-xxh3"
 	"golang.org/x/crypto/nacl/box"
 	"google.golang.org/protobuf/proto"
 )
+
+func intPtr(val int) *int {
+	return &val
+}
 
 // ---------------------------------------------------------
 // Integration / Full Lifecycle Tests
@@ -50,7 +55,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	destStore := NewMemStorage()
 	client := NewClient(destStore)
 
-	// 1. Initial Backup (should create FULL version)
+	// 1. Initial Backup
 	v1, err := client.Backup(context.Background(), folderSrc, BackupOptions{
 		Label:       "v1.0.0",
 		Concurrency: 2,
@@ -59,10 +64,6 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("v1 backup failed: %v", err)
-	}
-
-	if v1.Kind != tsyncv1.VersionKind_VERSION_KIND_FULL {
-		t.Fatalf("expected v1 kind to be FULL, got %v", v1.Kind)
 	}
 
 	// Verify that .tsync is present
@@ -81,26 +82,31 @@ func TestTsyncFullLifecycle(t *testing.T) {
 		Concurrency: 2,
 	})
 	if err != nil {
-		t.Fatalf("v2 incremental backup failed: %v", err)
+		t.Fatalf("v2 backup failed: %v", err)
 	}
 
-	if v2.Kind != tsyncv1.VersionKind_VERSION_KIND_DELTA {
-		t.Fatalf("expected v2 to be DELTA, got %v", v2.Kind)
+	if v2.PrecedingVersionId != v1.SnowflakeId {
+		t.Fatalf("expected v2 preceding version ID to be %d, got %d", v1.SnowflakeId, v2.PrecedingVersionId)
 	}
 
-	if v2.ParentId != v1.SnowflakeId {
-		t.Fatalf("expected v2 parent ID to be %d, got %d", v1.SnowflakeId, v2.ParentId)
+	// Read metadata to check v2 resolved map
+	pbBytes, _ := destStore.Read(context.Background(), ".tsync")
+	var metadata tsyncv2.BackupMetadata
+	_ = proto.Unmarshal(pbBytes, &metadata)
+
+	v2Map, err := ResolveVersionMap(&metadata, v2.SnowflakeId)
+	if err != nil {
+		t.Fatalf("failed to resolve v2 map: %v", err)
 	}
 
-	// Check delta contents
-	if _, ok := v2.DeltaChanges["file1.txt"]; !ok {
-		t.Errorf("expected file1.txt in delta changes")
+	if _, ok := v2Map["file1.txt"]; !ok {
+		t.Errorf("expected file1.txt in resolved v2 map")
 	}
-	if _, ok := v2.DeltaChanges["file4.txt"]; !ok {
-		t.Errorf("expected file4.txt in delta changes")
+	if _, ok := v2Map["file4.txt"]; !ok {
+		t.Errorf("expected file4.txt in resolved v2 map")
 	}
-	if len(v2.DeltaDeleted) != 1 || v2.DeltaDeleted[0] != "folder/subfolder/file3.dat" {
-		t.Errorf("expected folder/subfolder/file3.dat in delta deletions, got %v", v2.DeltaDeleted)
+	if _, exists := v2Map["folder/subfolder/file3.dat"]; exists {
+		t.Errorf("resolved v2 map should not contain deleted file3.dat")
 	}
 
 	// 3. Reconstruct / Restore v2 ZIP File (Unencrypted output)
@@ -174,7 +180,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	// 5. Restore with skip decryption errors
 	// Inject a corrupted FileRecord with bad keys to simulate a corruption
 	metadataBytes, _ := destStore.Read(context.Background(), ".tsync")
-	var corruptMetadata tsyncv1.BackupMetadata
+	var corruptMetadata tsyncv2.BackupMetadata
 	_ = proto.Unmarshal(metadataBytes, &corruptMetadata)
 
 	// Corrupt file4.txt's record
@@ -212,19 +218,19 @@ func TestTsyncFullLifecycle(t *testing.T) {
 		t.Fatalf("restore with SkipDecryptionErrors failed: %v", err)
 	}
 
-	// 6. Delete Version (with delta promotion test)
+	// 6. Delete Version
 	// Reset correct metadata
 	_ = destStore.Write(context.Background(), ".tsync", metadataBytes)
 
-	// Delete parent v1. Version v2 (which is delta) should be promoted to FULL.
+	// Delete version v1
 	err = client.DeleteVersion(context.Background(), v1.SnowflakeId)
 	if err != nil {
 		t.Fatalf("failed to delete version v1: %v", err)
 	}
 
 	// Load updated metadata
-	pbBytes, _ := destStore.Read(context.Background(), ".tsync")
-	var updatedMetadata tsyncv1.BackupMetadata
+	pbBytes, _ = destStore.Read(context.Background(), ".tsync")
+	var updatedMetadata tsyncv2.BackupMetadata
 	_ = proto.Unmarshal(pbBytes, &updatedMetadata)
 
 	if _, exists := updatedMetadata.Versions[strconv.FormatUint(v1.SnowflakeId, 10)]; exists {
@@ -236,26 +242,18 @@ func TestTsyncFullLifecycle(t *testing.T) {
 		t.Fatalf("version v2 was deleted unexpectedly")
 	}
 
-	if v2Updated.Kind != tsyncv1.VersionKind_VERSION_KIND_FULL {
-		t.Fatalf("expected delta version v2 to be promoted to FULL, but got kind %v", v2Updated.Kind)
+	// Verify we can still resolve v2 successfully
+	v2MapAfterDelete, err := ResolveVersionMap(&updatedMetadata, v2.SnowflakeId)
+	if err != nil {
+		t.Fatalf("failed to resolve version v2 after deleting v1: %v", err)
 	}
-
-	if len(v2Updated.PathToFileKey) == 0 {
-		t.Fatalf("promoted version v2 path map is empty")
+	if len(v2MapAfterDelete) == 0 {
+		t.Fatalf("resolved version v2 map is empty")
 	}
 
 	// 7. Single Version Mode Test
 	// Add one more file to source
 	_ = srcStore.Write(context.Background(), "file5.txt", []byte("Single version mode file"))
-
-	// Record existing keys in destStore
-	existingDestFiles, _ := destStore.List(context.Background(), "")
-	existingPartCount := 0
-	for _, f := range existingDestFiles {
-		if f.Name != ".tsync" {
-			existingPartCount++
-		}
-	}
 
 	v3, err := client.Backup(context.Background(), folderSrc, BackupOptions{
 		Label:             "single-version-run",
@@ -267,7 +265,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 
 	// Load updated metadata
 	pbBytes, _ = destStore.Read(context.Background(), ".tsync")
-	var singleMetadata tsyncv1.BackupMetadata
+	var singleMetadata tsyncv2.BackupMetadata
 	_ = proto.Unmarshal(pbBytes, &singleMetadata)
 
 	if len(singleMetadata.Versions) != 1 {
@@ -289,7 +287,11 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	}
 
 	// The store should only contain part files referenced by v3
-	expectedPartCount := len(v3Metadata.PathToFileKey)
+	v3Map, err := ResolveVersionMap(&singleMetadata, v3.SnowflakeId)
+	if err != nil {
+		t.Fatalf("failed to resolve v3 map: %v", err)
+	}
+	expectedPartCount := len(v3Map)
 	if partCountAfter != expectedPartCount {
 		t.Fatalf("expected %d file parts in storage after single version run, got %d", expectedPartCount, partCountAfter)
 	}
@@ -397,7 +399,6 @@ func TestTsyncRestoreOptions(t *testing.T) {
 	}
 
 	// 3. Modify a file at destination (change content but keep same size)
-	// Changing content but keeping same size to verify CRC32 check works correctly
 	_ = os.WriteFile(restoredPath, []byte("Restore options verif_cation content"), 0644)
 
 	// Set a very old mod time to verify it actually gets updated/overwritten
@@ -428,7 +429,6 @@ func TestTsyncRestoreOptions(t *testing.T) {
 	}
 
 	// 4. Test NoOverwrite = true
-	// Modify content of the restored file again
 	_ = os.WriteFile(restoredPath, []byte("manually modified content"), 0644)
 	oldTime2 := time.Now().Add(-5 * time.Hour)
 	_ = os.Chtimes(restoredPath, oldTime2, oldTime2)
@@ -493,7 +493,7 @@ func TestTsyncEncryptedZipSource(t *testing.T) {
 	zipPath := "encrypted-archive.zip"
 	_ = srcStore.Write(context.Background(), zipPath, zipBuf.Bytes())
 
-	// Create ZipFileSource with isEncrypted = true (Case A)
+	// Create ZipFileSource with isEncrypted = true
 	zipSrc := NewZipFileSource(srcStore, zipPath, true)
 
 	// Backup
@@ -654,10 +654,6 @@ func TestTsyncCompressionLevels(t *testing.T) {
 	}
 }
 
-func intPtr(val int) *int {
-	return &val
-}
-
 func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	vmPub, _, err := box.GenerateKey(rand.Reader)
 	if err != nil {
@@ -700,7 +696,7 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to duplicate version ID, but got nil")
-	} else if !bytes.Contains([]byte(err.Error()), []byte("already exists")) {
+	} else if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("expected 'already exists' error, got: %v", err)
 	}
 
@@ -714,7 +710,7 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to out-of-bounds version ID, but got nil")
-	} else if !bytes.Contains([]byte(err.Error()), []byte("invalid custom version ID")) {
+	} else if !strings.Contains(err.Error(), "invalid custom version ID") {
 		t.Errorf("expected 'invalid custom version ID' error, got: %v", err)
 	}
 
@@ -728,7 +724,7 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to future timestamp, but got nil")
-	} else if !bytes.Contains([]byte(err.Error()), []byte("is in the future")) {
+	} else if !strings.Contains(err.Error(), "is in the future") {
 		t.Errorf("expected 'is in the future' error, got: %v", err)
 	}
 
@@ -743,7 +739,170 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to timestamp before latest version, but got nil")
-	} else if !bytes.Contains([]byte(err.Error()), []byte("must be after the latest version's backup timestamp")) {
+	} else if !strings.Contains(err.Error(), "must be after the latest version's backup timestamp") {
 		t.Errorf("expected 'must be after the latest version's' error, got: %v", err)
 	}
+}
+
+func TestTsyncV2ValidationAndBestEffort(t *testing.T) {
+	vmPub, vmPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	t.Run("Invalid File Names Rejected during Backup", func(t *testing.T) {
+		invalidNames := []string{
+			"foo/../bar",
+			"foo/./bar",
+			"foo//bar",
+			"foo/bar\x00baz",
+			"foo/bar\\baz",
+			"",
+			strings.Repeat("a", 256),
+		}
+
+		for _, name := range invalidNames {
+			srcStore := NewMemStorage()
+			_ = srcStore.Write(context.Background(), name, []byte("test content"))
+			destStore := NewMemStorage()
+			client := NewClient(destStore)
+
+			_, err = client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+				Label:      "invalid-run",
+				KeyID:      "key-1",
+				PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+			})
+			if err == nil {
+				t.Errorf("expected backup to fail for invalid name %q, but succeeded", name)
+			}
+		}
+	})
+
+	t.Run("Reject Schema Version != 2", func(t *testing.T) {
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		// Create metadata with schema version 1
+		metadata := tsyncv2.BackupMetadata{
+			Versions:      make(map[string]*tsyncv2.Version),
+			SchemaVersion: 1,
+		}
+		pbBytes, _ := proto.Marshal(&metadata)
+		_ = destStore.Write(context.Background(), ".tsync", pbBytes)
+
+		// ListVersions should fail
+		_, err = client.ListVersions(context.Background())
+		if err == nil {
+			t.Errorf("expected ListVersions to fail for schema version 1")
+		}
+
+		// Restore should fail
+		err = client.Restore(context.Background(), 123, RestoreOptions{})
+		if err == nil {
+			t.Errorf("expected Restore to fail for schema version 1")
+		}
+	})
+
+	t.Run("Tree Validation Failures and SkipValidationErrors", func(t *testing.T) {
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "a.txt", []byte("file a"))
+		_ = srcStore.Write(context.Background(), "b.txt", []byte("file b"))
+		_ = srcStore.Write(context.Background(), "c.txt", []byte("file c"))
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		v, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+			Label:      "valid-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup failed: %v", err)
+		}
+
+		// A. Validate normal restore succeeds
+		tmpDir, err := os.MkdirTemp("", "tsync-validation-test-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("normal restore failed: %v", err)
+		}
+
+		// B. Test out-of-order entries in a TreeNode
+		pbBytes, _ := destStore.Read(context.Background(), ".tsync")
+		var metadata tsyncv2.BackupMetadata
+		_ = proto.Unmarshal(pbBytes, &metadata)
+
+		// Corrupt sorting of the root node
+		var rootNode *tsyncv2.TreeNode
+		for _, node := range metadata.Trees {
+			rootNode = node
+			break
+		}
+		if rootNode == nil || len(rootNode.Entries) < 2 {
+			t.Fatalf("expected at least 2 entries in root node")
+		}
+
+		// Swap two entries to make it out-of-order
+		rootNode.Entries[0], rootNode.Entries[1] = rootNode.Entries[1], rootNode.Entries[0]
+
+		// Save back corrupted metadata
+		corruptPb, _ := proto.Marshal(&metadata)
+		_ = destStore.Write(context.Background(), ".tsync", corruptPb)
+
+		// Restore should fail
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err == nil {
+			t.Errorf("expected restore to fail due to unsorted tree node, but succeeded")
+		}
+
+		// Restore with SkipValidationErrors should succeed
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir:           tmpDir,
+			PrivateKey:           vmPriv[:],
+			SkipValidationErrors: true,
+		})
+		if err != nil {
+			t.Errorf("expected restore with SkipValidationErrors to succeed for unsorted tree, got: %v", err)
+		}
+
+		// C. Test incorrect tree node hash / missing tree node
+		_ = proto.Unmarshal(pbBytes, &metadata)
+		for k, v := range metadata.Versions {
+			v.RootTreeHash = "invalidhash123456789012345678901234567890123456789012345678901234"
+			metadata.Versions[k] = v
+		}
+		corruptPb, _ = proto.Marshal(&metadata)
+		_ = destStore.Write(context.Background(), ".tsync", corruptPb)
+
+		// Restore should fail
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err == nil {
+			t.Errorf("expected restore to fail due to missing/invalid root tree hash, but succeeded")
+		}
+
+		// Restore with SkipValidationErrors should skip/return empty without failing
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir:           tmpDir,
+			PrivateKey:           vmPriv[:],
+			SkipValidationErrors: true,
+		})
+		if err != nil {
+			t.Errorf("expected restore with SkipValidationErrors to succeed for missing tree node, got: %v", err)
+		}
+	})
 }

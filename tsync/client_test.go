@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
-
 	zip "github.com/abyii/zip-xxh3"
 	"golang.org/x/crypto/nacl/box"
 )
@@ -68,7 +66,7 @@ func TestZipFileSourceAndLoadStoreInfo(t *testing.T) {
 		t.Fatalf("backup failed: %v", err)
 	}
 
-	// Test ReadMetadata instead of LoadStoreInfo
+	// Test ReadMetadata
 	sm, err := client.ReadMetadata(context.Background())
 	if err != nil {
 		t.Fatalf("ReadMetadata failed: %v", err)
@@ -111,8 +109,8 @@ func TestStoreMetadataWrapper(t *testing.T) {
 	}
 
 	// Verify metadata values
-	if sm.SchemaVersion() != 1 {
-		t.Errorf("expected SchemaVersion 1, got %d", sm.SchemaVersion())
+	if sm.SchemaVersion() != 2 {
+		t.Errorf("expected SchemaVersion 2, got %d", sm.SchemaVersion())
 	}
 	if len(sm.PublicKeys()) != 1 || sm.PublicKeys()["my-key"] == nil {
 		t.Errorf("missing public key")
@@ -124,9 +122,6 @@ func TestStoreMetadataWrapper(t *testing.T) {
 	}
 	if latest.Label != "test-run" {
 		t.Errorf("latest version label mismatch")
-	}
-	if latest.Kind != tsyncv1.VersionKind_VERSION_KIND_FULL {
-		t.Errorf("latest version kind mismatch")
 	}
 
 	if !sm.HasVersion(v.SnowflakeId) {

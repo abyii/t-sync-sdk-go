@@ -2,16 +2,20 @@ package tsync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash"
 	"hash/crc32"
 	"io"
 	"path"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	tsyncv1 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v1"
+	tsyncv2 "github.com/abyii/t-sync-sdk-go/gen/go/com/github/abyii/tsync/v2"
 
 	zip "github.com/abyii/zip-xxh3"
 	"google.golang.org/protobuf/proto"
@@ -77,7 +81,91 @@ func (tw *trackingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions) (*tsyncv1.Version, error) {
+// validateName validates a single name component for directory or file entries.
+func validateName(name string) error {
+	if len(name) == 0 {
+		return fmt.Errorf("name cannot be empty")
+	}
+	if len(name) > 255 {
+		return fmt.Errorf("name exceeds maximum length of 255 bytes: %q", name)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '/' || c == '\\' {
+			return fmt.Errorf("name contains illegal character %q: %q", c, name)
+		}
+		if c == 0 {
+			return fmt.Errorf("name contains null byte: %q", name)
+		}
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("name cannot be directory traversal sentinel %q", name)
+	}
+	return nil
+}
+
+type tempDirNode struct {
+	files   map[string]*tsyncv2.FileLeaf
+	subdirs map[string]*tempDirNode
+}
+
+func newTempDirNode() *tempDirNode {
+	return &tempDirNode{
+		files:   make(map[string]*tsyncv2.FileLeaf),
+		subdirs: make(map[string]*tempDirNode),
+	}
+}
+
+func (n *tempDirNode) buildAndHash(trees map[string]*tsyncv2.TreeNode) (string, error) {
+	var entries []*tsyncv2.TreeEntry
+
+	for name, fileLeaf := range n.files {
+		entries = append(entries, &tsyncv2.TreeEntry{
+			Name: name,
+			Node: &tsyncv2.TreeEntry_File{
+				File: fileLeaf,
+			},
+		})
+	}
+
+	for name, subdirNode := range n.subdirs {
+		subHash, err := subdirNode.buildAndHash(trees)
+		if err != nil {
+			return "", err
+		}
+		entries = append(entries, &tsyncv2.TreeEntry{
+			Name: name,
+			Node: &tsyncv2.TreeEntry_SubtreeHash{
+				SubtreeHash: subHash,
+			},
+		})
+	}
+
+	// 1. Sort entries by name - raw UTF-8 byte order, case-sensitive
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+
+	// 2. Deterministic proto3 binary encoding
+	treeNode := &tsyncv2.TreeNode{
+		Entries: entries,
+	}
+
+	marshaled, err := proto.MarshalOptions{Deterministic: true}.Marshal(treeNode)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal tree node: %w", err)
+	}
+
+	// 3. Hash: SHA-256 over serialized bytes
+	h := sha256.New()
+	h.Write(marshaled)
+	hashHex := hex.EncodeToString(h.Sum(nil))
+
+	trees[hashHex] = treeNode
+	return hashHex, nil
+}
+
+func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions) (*tsyncv2.Version, error) {
 	// 0. Validate custom options if passed
 	if opts.CustomVersionID != 0 {
 		if opts.CustomVersionID > 9223372036854775807 {
@@ -118,7 +206,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 		return nil, fmt.Errorf("failed to list source entries: %w", err)
 	}
 
-	// Apply filter
+	// Apply filter and validate path components upfront
 	var entries []SourceEntry
 	for _, entry := range allEntries {
 		if opts.FilterFunc != nil {
@@ -130,16 +218,28 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 				continue
 			}
 		}
+
+		// Validate name components
+		parts := strings.Split(entry.Path, "/")
+		for _, part := range parts {
+			if err := validateName(part); err != nil {
+				return nil, fmt.Errorf("invalid path component in %q: %w", entry.Path, err)
+			}
+		}
+
 		entries = append(entries, entry)
 	}
 
 	// 2. Load existing metadata or initialize new
-	var metadata tsyncv1.BackupMetadata
+	var metadata tsyncv2.BackupMetadata
 	hasOldMetadata := false
 
 	tsyncBytes, err := dest.Read(ctx, ".tsync")
 	if err == nil {
 		if err = proto.Unmarshal(tsyncBytes, &metadata); err == nil {
+			if metadata.SchemaVersion != 2 {
+				return nil, fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
+			}
 			hasOldMetadata = true
 		}
 	}
@@ -151,7 +251,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 			}
 		}
 		if !opts.CustomBackupTimestamp.IsZero() && len(metadata.Versions) > 0 {
-			var latestV *tsyncv1.Version
+			var latestV *tsyncv2.Version
 			for _, v := range metadata.Versions {
 				if latestV == nil || v.BackupTimestamp.AsTime().After(latestV.BackupTimestamp.AsTime()) {
 					latestV = v
@@ -167,11 +267,12 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 		if len(opts.PublicKeys) == 0 {
 			return nil, fmt.Errorf("creating a new backup store requires providing at least one public key in options")
 		}
-		metadata = tsyncv1.BackupMetadata{
-			Versions:      make(map[string]*tsyncv1.Version),
-			Files:         make(map[string]*tsyncv1.FileRecord),
+		metadata = tsyncv2.BackupMetadata{
+			Versions:      make(map[string]*tsyncv2.Version),
+			Trees:         make(map[string]*tsyncv2.TreeNode),
+			Files:         make(map[string]*tsyncv2.FileRecord),
 			PublicKeys:    opts.PublicKeys,
-			SchemaVersion: 1,
+			SchemaVersion: 2,
 		}
 	} else {
 		// Merge any new public keys into the existing ones
@@ -251,7 +352,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	type result struct {
 		path   string
 		key    string
-		record *tsyncv1.FileRecord
+		record *tsyncv2.FileRecord
 		err    error
 	}
 
@@ -274,7 +375,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 
 				// A. Check if the file part already exists in the metadata files pool
 				var fileKey string
-				var record *tsyncv1.FileRecord
+				var record *tsyncv2.FileRecord
 
 				if entry.CRC32 != 0 || entry.Size == 0 {
 					fileKey = fmt.Sprintf("%08x_%d", entry.CRC32, entry.Size)
@@ -499,7 +600,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 						}
 					}
 
-					record = &tsyncv1.FileRecord{
+					record = &tsyncv2.FileRecord{
 						EphemeralPublicKey:   ephPubKey,
 						EncryptedZipPassword: encryptedZipPass,
 						Crc32:                finalCrc32,
@@ -535,7 +636,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 
 	// 5. Gather results
 	newPathToFileKey := make(map[string]string)
-	newFilesPool := make(map[string]*tsyncv1.FileRecord)
+	newFilesPool := make(map[string]*tsyncv2.FileRecord)
 
 	doneCount := 0
 	for res := range resultChan {
@@ -551,54 +652,45 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 		}
 	}
 
-	// 6. Resolve version kind (FULL vs DELTA)
-	var kind tsyncv1.VersionKind = tsyncv1.VersionKind_VERSION_KIND_FULL
-	var parentID uint64 = 0
-	var deltaChanges map[string]string
-	var deltaDeleted []string
-
-	if opts.SingleVersionMode {
-		kind = tsyncv1.VersionKind_VERSION_KIND_FULL
-	} else if hasOldMetadata && len(metadata.Versions) > 0 {
-		// Find parent version (the latest version in the store)
-		var parentV *tsyncv1.Version
-		for _, v := range metadata.Versions {
-			if parentV == nil || v.BackupTimestamp.AsTime().After(parentV.BackupTimestamp.AsTime()) {
-				parentV = v
-			}
-		}
-
-		// DELTA is only allowed if parent is FULL (no delta chains)
-		if parentV != nil && parentV.Kind == tsyncv1.VersionKind_VERSION_KIND_FULL {
-			parentID = parentV.SnowflakeId
-			deltaChanges = make(map[string]string)
-			deltaDeleted = make([]string, 0)
-
-			// Calculate changes relative to parent
-			for path, fileKey := range newPathToFileKey {
-				parentKey, exists := parentV.PathToFileKey[path]
-				if !exists || parentKey != fileKey {
-					deltaChanges[path] = fileKey
+	// Build the directory tree structure
+	rootNode := newTempDirNode()
+	for p, fileKey := range newPathToFileKey {
+		parts := strings.Split(p, "/")
+		curr := rootNode
+		for i, part := range parts {
+			if i == len(parts)-1 {
+				// Path collision check: file vs directory
+				if _, exists := curr.subdirs[part]; exists {
+					return nil, fmt.Errorf("path collision: %q is both a directory and a file", p)
 				}
-			}
-
-			// Calculate deletions relative to parent
-			for path := range parentV.PathToFileKey {
-				if _, exists := newPathToFileKey[path]; !exists {
-					deltaDeleted = append(deltaDeleted, path)
+				rec := newFilesPool[fileKey]
+				curr.files[part] = &tsyncv2.FileLeaf{
+					Crc32:            rec.Crc32,
+					UncompressedSize: rec.UncompressedSize,
 				}
-			}
-
-			deltaCost := len(deltaChanges) + len(deltaDeleted)
-			fullCost := len(newPathToFileKey)
-
-			if deltaCost < fullCost {
-				kind = tsyncv1.VersionKind_VERSION_KIND_DELTA
+			} else {
+				// Path collision check: file vs directory
+				if _, exists := curr.files[part]; exists {
+					return nil, fmt.Errorf("path collision: %q is both a file and a directory", p)
+				}
+				subdir, exists := curr.subdirs[part]
+				if !exists {
+					subdir = newTempDirNode()
+					curr.subdirs[part] = subdir
+				}
+				curr = subdir
 			}
 		}
 	}
 
-	// 7. Create the new Version message
+	// Recursively build and hash TreeNodes bottom-up
+	newTreesMap := make(map[string]*tsyncv2.TreeNode)
+	rootHash, err := rootNode.buildAndHash(newTreesMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build and hash directory tree: %w", err)
+	}
+
+	// 6. Create the new Version message
 	versionID := opts.CustomVersionID
 	if versionID == 0 {
 		versionID = hashStringToUint64(strconv.FormatInt(time.Now().UnixNano(), 10))
@@ -607,44 +699,59 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	if !opts.CustomBackupTimestamp.IsZero() {
 		backupTime = opts.CustomBackupTimestamp
 	}
-	newVersion := &tsyncv1.Version{
-		SnowflakeId:     versionID,
-		BackupTimestamp: timestamppb.New(backupTime),
-		Kind:            kind,
-		Label:           opts.Label,
+
+	var precedingID uint64 = 0
+	if hasOldMetadata && len(metadata.Versions) > 0 {
+		var latestV *tsyncv2.Version
+		for _, v := range metadata.Versions {
+			if latestV == nil || v.BackupTimestamp.AsTime().After(latestV.BackupTimestamp.AsTime()) {
+				latestV = v
+			}
+		}
+		if latestV != nil {
+			precedingID = latestV.SnowflakeId
+		}
 	}
 
-	if kind == tsyncv1.VersionKind_VERSION_KIND_FULL {
-		newVersion.PathToFileKey = newPathToFileKey
-	} else {
-		newVersion.ParentId = parentID
-		newVersion.DeltaChanges = deltaChanges
-		newVersion.DeltaDeleted = deltaDeleted
+	newVersion := &tsyncv2.Version{
+		SnowflakeId:        versionID,
+		BackupTimestamp:    timestamppb.New(backupTime),
+		RootTreeHash:       rootHash,
+		PrecedingVersionId: precedingID,
+		Label:              opts.Label,
 	}
 
-	// 8. Prepare final metadata updates
-	newMetadata := &tsyncv1.BackupMetadata{
-		Versions:      make(map[string]*tsyncv1.Version),
-		Files:         make(map[string]*tsyncv1.FileRecord),
+	// 7. Prepare final metadata updates
+	newMetadata := &tsyncv2.BackupMetadata{
+		Versions:      make(map[string]*tsyncv2.Version),
+		Trees:         make(map[string]*tsyncv2.TreeNode),
+		Files:         make(map[string]*tsyncv2.FileRecord),
 		PublicKeys:    metadata.PublicKeys,
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		LastUpdated:   timestamppb.New(time.Now()),
 	}
 
 	if opts.SingleVersionMode {
-		// Single Version Mode: keep only the new FULL version
 		newMetadata.Versions[strconv.FormatUint(versionID, 10)] = newVersion
-
-		// In-memory files pool contains only files referenced by the new version
-		for _, key := range newPathToFileKey {
-			newMetadata.Files[key] = newFilesPool[key]
+		for k, v := range newTreesMap {
+			newMetadata.Trees[k] = v
+		}
+		for k, v := range newFilesPool {
+			newMetadata.Files[k] = v
 		}
 	} else {
-		// Multi Version Mode: keep all versions and files
+		// Keep all old versions, trees, and files
 		for k, v := range metadata.Versions {
 			newMetadata.Versions[k] = v
 		}
 		newMetadata.Versions[strconv.FormatUint(versionID, 10)] = newVersion
+
+		for k, v := range metadata.Trees {
+			newMetadata.Trees[k] = v
+		}
+		for k, v := range newTreesMap {
+			newMetadata.Trees[k] = v
+		}
 
 		for k, v := range metadata.Files {
 			newMetadata.Files[k] = v
@@ -654,7 +761,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 		}
 	}
 
-	// 9. Write .tsync file
+	// 8. Write .tsync file
 	pbBytes, err := proto.Marshal(newMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize backup metadata: %w", err)
@@ -665,7 +772,7 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 		return nil, fmt.Errorf("failed to write .tsync file: %w", err)
 	}
 
-	// 10. Clean up orphaned file parts if in Single Version Mode or if metadata changed
+	// 9. Clean up orphaned file parts if in Single Version Mode
 	if opts.SingleVersionMode && hasOldMetadata {
 		for oldKey := range metadata.Files {
 			if _, exists := newMetadata.Files[oldKey]; !exists {
