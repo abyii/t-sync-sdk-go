@@ -1,5 +1,3 @@
-github.com/abyii/zip-xxh3 v1.9.1 h1:Cvn/CON6InkpPWNUbwbJfg2xe2tNeNmHRmzWOMBJC9Y=
-github.com/abyii/zip-xxh3 v1.9.1/go.mod h1:lPapu3Tc472hO45DvGHGIidYBw1hHSJkbI+ZfbAuOis=
 github.com/abyii/zip-xxh3 v1.9.2 h1:qEGgB/JXvQeMHPIUsjKc7vNRSM7/AGugnfIrsUN7XnI=
 github.com/abyii/zip-xxh3 v1.9.2/go.mod h1:lPapu3Tc472hO45DvGHGIidYBw1hHSJkbI+ZfbAuOis=
 github.com/aws/aws-sdk-go-v2 v1.41.8 h1:sRs7nG6/RiEBZ/K5UO2sNw0w40U02Nmz1VtARloTZXk=

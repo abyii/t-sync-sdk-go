@@ -46,6 +46,11 @@ type BackupOptions struct {
 	// If 1 to 9, it uses Deflate with the specified level.
 	CompressionLevel *int
 
+	// GetCompressionLevel is an optional callback allowing clients to specify per-file compression levels.
+	// The callback is passed the file path and returns the compression level to use (from -1 to 9).
+	// If the callback returns nil, the engine falls back to CompressionLevel option, and then to default (5).
+	GetCompressionLevel func(path string) *int
+
 	// CustomVersionID specifies a custom Snowflake ID for this backup version.
 	// If 0, a new ID is generated automatically.
 	CustomVersionID uint64
@@ -178,18 +183,16 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 		}
 	}
 
-	// Resolve compression method and level
-	compMethod := zip.Deflate
-	compLevel := 5
+	// Resolve global compression method and level
+	globalCompMethod := zip.Deflate
+	globalCompLevel := -1
 	if opts.CompressionLevel != nil {
 		lvl := *opts.CompressionLevel
-		if lvl == -1 {
-			compLevel = 5
-		} else if lvl == 0 {
-			compMethod = zip.Store
-			compLevel = 0
-		} else if lvl >= 1 && lvl <= 9 {
-			compLevel = lvl
+		if lvl == 0 {
+			globalCompMethod = zip.Store
+			globalCompLevel = 0
+		} else if lvl >= -1 && lvl <= 9 {
+			globalCompLevel = lvl
 		} else {
 			return nil, fmt.Errorf("invalid compression level: %d (must be between -1 and 9)", lvl)
 		}
@@ -411,6 +414,27 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 					var compSize int64
 					var uncompSize int64
 					var finalCrc32 uint32
+
+					// Resolve compression method and level for this file
+					compMethod := globalCompMethod
+					compLevel := globalCompLevel
+					if opts.GetCompressionLevel != nil {
+						lvlPtr := opts.GetCompressionLevel(entry.Path)
+						if lvlPtr != nil {
+							lvl := *lvlPtr
+							if lvl == 0 {
+								compMethod = zip.Store
+								compLevel = 0
+							} else if lvl >= -1 && lvl <= 9 {
+								compMethod = zip.Deflate
+								compLevel = lvl
+							} else {
+								cancel()
+								resultChan <- result{err: fmt.Errorf("invalid compression level returned by callback for %s: %d", entry.Path, lvl)}
+								continue
+							}
+						}
+					}
 
 					if entry.IsEncryptedRaw {
 						// Stream raw part bytes directly

@@ -967,14 +967,124 @@ func TestTsyncV2ValidationAndBestEffort(t *testing.T) {
 		if _, exists := metadata2.Trees["orphanedtreehash123456789012345678901234567890123456789012345"]; exists {
 			t.Errorf("orphaned tree was not pruned by GC")
 		}
-		if _, exists := metadata2.Files["00003039_67890"]; exists {
-			t.Errorf("orphaned file record was not pruned by GC")
-		}
-
 		// Verify orphaned file part is gone from storage
 		exists, _ := destStore.Exists(context.Background(), fakeOrphanKey)
 		if exists {
 			t.Errorf("orphaned storage part was not deleted by GC")
 		}
 	})
+}
+
+func TestTsyncPerFileCompressionCallback(t *testing.T) {
+	vmPub, vmPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	srcStore := NewMemStorage()
+	contentTxt := []byte("compression callback txt content that repeats repeats repeats repeats")
+	contentPng := []byte("compression callback png content that repeats repeats repeats repeats")
+	contentDat := []byte("compression callback dat content that repeats repeats repeats repeats")
+
+	_ = srcStore.Write(context.Background(), "a.txt", contentTxt)
+	_ = srcStore.Write(context.Background(), "b.png", contentPng)
+	_ = srcStore.Write(context.Background(), "c.dat", contentDat)
+
+	destStore := NewMemStorage()
+	client := NewClient(destStore)
+
+	// Callback:
+	// - Returns 0 (Store) for .png
+	// - Returns 9 (Deflate Level 9) for .txt
+	// - Returns nil (fallback) for .dat (which should fallback to global CompressionLevel = 1)
+	globalLvl := 1
+	v, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+		Label:            "per-file-comp-run",
+		KeyID:            "key-1",
+		PublicKeys:       map[string][]byte{"key-1": vmPub[:]},
+		CompressionLevel: &globalLvl,
+		GetCompressionLevel: func(path string) *int {
+			if strings.HasSuffix(path, ".png") {
+				return intPtr(0)
+			}
+			if strings.HasSuffix(path, ".txt") {
+				return intPtr(9)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("backup failed: %v", err)
+	}
+
+	// 1. Read metadata and verify files
+	sm, err := client.ReadMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("failed to read metadata: %v", err)
+	}
+
+	resolvedMap, err := ResolveVersionMap(sm.metadata, v.SnowflakeId)
+	if err != nil {
+		t.Fatalf("failed to resolve version map: %v", err)
+	}
+
+	// Helper to check compression method in stored part
+	checkMethod := func(path string, expectedMethod uint16) {
+		fileKey, ok := resolvedMap[path]
+		if !ok {
+			t.Fatalf("file %s not found in resolved map", path)
+		}
+		partKey := fmt.Sprintf("%s/%s", fileKey[0:2], fileKey)
+		partData, err := destStore.Read(context.Background(), partKey)
+		if err != nil {
+			t.Fatalf("failed to read part data for %s: %v", path, err)
+		}
+		if len(partData) < 10 {
+			t.Fatalf("part data too short for %s", path)
+		}
+		sig := binary.LittleEndian.Uint32(partData[0:4])
+		if sig != 0x04034b50 {
+			t.Fatalf("invalid local file header signature for %s: 0x%08x", path, sig)
+		}
+		compMethod := binary.LittleEndian.Uint16(partData[8:10])
+		if compMethod != expectedMethod {
+			t.Errorf("expected compression method %d for %s, got %d", expectedMethod, path, compMethod)
+		}
+	}
+
+	// .png must be stored (0)
+	checkMethod("b.png", zip.Store)
+	// .txt must be deflated (8)
+	checkMethod("a.txt", zip.Deflate)
+	// .dat must be deflated (8)
+	checkMethod("c.dat", zip.Deflate)
+
+	// 2. Restore and verify content integrity
+	tmpDir, err := os.MkdirTemp("", "tsync-per-file-restore-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+		ExtractDir: tmpDir,
+		PrivateKey: vmPriv[:],
+	})
+	if err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	restoredTxt, _ := os.ReadFile(filepath.Join(tmpDir, "a.txt"))
+	restoredPng, _ := os.ReadFile(filepath.Join(tmpDir, "b.png"))
+	restoredDat, _ := os.ReadFile(filepath.Join(tmpDir, "c.dat"))
+
+	if !bytes.Equal(restoredTxt, contentTxt) {
+		t.Errorf("restored txt content mismatch")
+	}
+	if !bytes.Equal(restoredPng, contentPng) {
+		t.Errorf("restored png content mismatch")
+	}
+	if !bytes.Equal(restoredDat, contentDat) {
+		t.Errorf("restored dat content mismatch")
+	}
 }

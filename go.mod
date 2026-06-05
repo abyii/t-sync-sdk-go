@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.102.1
 	github.com/oracle/oci-go-sdk/v65 v65.116.0
 	golang.org/x/crypto v0.45.0
+	golang.org/x/sys v0.38.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -28,5 +29,4 @@ require (
 	github.com/sony/gobreaker/v2 v2.4.0 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
-	golang.org/x/sys v0.38.0 // indirect
 )
