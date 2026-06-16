@@ -31,30 +31,40 @@ func NewOCIClient(namespace, authType string) (*OCIClient, error) {
 		return nil, fmt.Errorf("namespace is required")
 	}
 
+	parts := strings.SplitN(authType, ";", 2)
+	baseAuth := parts[0]
+	region := ""
+	if len(parts) > 1 {
+		opt := parts[1]
+		if strings.HasPrefix(opt, "region=") {
+			region = strings.TrimPrefix(opt, "region=")
+		}
+	}
+
 	var provider common.ConfigurationProvider
 	var err error
 
-	if strings.HasPrefix(authType, "OCI_CONFIG_FILE") {
+	if strings.HasPrefix(baseAuth, "OCI_CONFIG_FILE") {
 		profile := "DEFAULT"
-		if strings.Contains(authType, "[") && strings.Contains(authType, "]") {
-			start := strings.Index(authType, "[")
-			end := strings.Index(authType, "]")
+		if strings.Contains(baseAuth, "[") && strings.Contains(baseAuth, "]") {
+			start := strings.Index(baseAuth, "[")
+			end := strings.Index(baseAuth, "]")
 			if start != -1 && end != -1 && end > start {
-				profile = authType[start+1 : end]
+				profile = baseAuth[start+1 : end]
 			}
 		}
 		provider = common.CustomProfileConfigProvider("~/.oci/config", profile)
-	} else if authType == "OKE_WORKLOAD_IDENTITY" {
+	} else if baseAuth == "OKE_WORKLOAD_IDENTITY" {
 		provider, err = auth.OkeWorkloadIdentityConfigurationProvider()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OKE workload identity provider: %v", err)
 		}
-	} else if authType == "INSTANCE_PRINCIPAL" {
+	} else if baseAuth == "INSTANCE_PRINCIPAL" {
 		provider, err = auth.InstancePrincipalConfigurationProvider()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create instance principal provider: %v", err)
 		}
-	} else if authType == "RESOURCE_PRINCIPAL" {
+	} else if baseAuth == "RESOURCE_PRINCIPAL" {
 		provider, err = auth.ResourcePrincipalConfigurationProvider()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create resource principal provider: %v", err)
@@ -71,6 +81,10 @@ func NewOCIClient(namespace, authType string) (*OCIClient, error) {
 	// Remove default 60s timeout for large file streaming
 	client.HTTPClient = &http.Client{
 		Timeout: 0,
+	}
+
+	if region != "" {
+		client.SetRegion(region)
 	}
 
 	return &OCIClient{

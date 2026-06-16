@@ -38,6 +38,60 @@ To keep the core `tsync` library lightweight and free of heavy external dependen
   import _ "github.com/abyii/t-sync-sdk-go/v2/storage_clients/http"
   ```
 
+### Configuring and Initializing Storage Clients
+
+Once a storage backend is enabled via imports, you can instantiate the unified client using:
+```go
+import "github.com/abyii/t-sync-sdk-go/v2/storage_clients"
+
+// ...
+client, err := storage_clients.GetClient(provider, authType, namespace)
+```
+
+#### Supported Authentication Types (`authType`)
+
+##### 1. AWS S3 Provider (`provider: "s3"`)
+The `s3` client supports the following authentication configurations:
+* **Static Access Keys**: `S3_ACCESS_KEYS[access_key:secret_key]` or `S3_ACCESS_KEYS[access_key:secret_key:session_token]`
+* **Default SDK Credentials**: `DEFAULT`
+  * Loads configurations and credentials automatically using the default AWS SDK resolver (environment variables, shared config files, EC2 instance metadata, ECS task roles, or EKS IAM roles).
+* **IAM Role Assumption**: `DEFAULT[arn:aws:iam::<account_id>:role/<role_name>]`
+  * Automatically loads default credentials, then performs role assumption via AWS STS. The temporary assumed role credentials are automatically cached and rotated prior to expiration using `aws.NewCredentialsCache`.
+
+##### 2. OCI Provider (`provider: "oci"`)
+The `oci` client supports the following authentication configurations:
+* **Config File Profiles**: `OCI_CONFIG_FILE` or `OCI_CONFIG_FILE[profile_name]` (defaults to `~/.oci/config` and the `DEFAULT` profile).
+* **OKE Workload Identity**: `OKE_WORKLOAD_IDENTITY`
+* **Instance Principal**: `INSTANCE_PRINCIPAL`
+* **Resource Principal**: `RESOURCE_PRINCIPAL`
+
+---
+
+#### Region Configuration
+
+You can configure the target region either **declaratively** (within the `authType` configuration string) or **programmatically** (via the `.SetRegion()` method).
+
+##### 1. Declarative Region Setup (S3 & OCI)
+Suffix any `authType` string with `;region=<region>` to specify the region when instantiating the client:
+```go
+// AWS S3 with static access keys in a specific region
+s3Client, err := storage_clients.GetClient("s3", "S3_ACCESS_KEYS[key:secret];region=us-west-2", "")
+
+// AWS S3 with assumed IAM role in a specific region
+s3Client, err := storage_clients.GetClient("s3", "DEFAULT[arn:aws:iam::123456789012:role/MyRole];region=eu-west-1", "")
+
+// OCI with Instance Principal authentication in a specific region
+ociClient, err := storage_clients.GetClient("oci", "INSTANCE_PRINCIPAL;region=uk-london-1", "my-namespace")
+```
+
+##### 2. Programmatic Region Setup (S3 & OCI)
+You can dynamically modify the target region at runtime:
+```go
+// Configure region programmatically
+client.SetRegion("us-east-1")
+```
+*Note: For the S3 client, `SetRegion` is fully thread-safe and safe to call concurrently with active storage operations.*
+
 ---
 
 ## Quick Start Examples

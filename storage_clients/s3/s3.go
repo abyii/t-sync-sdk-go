@@ -9,13 +9,17 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/abyii/t-sync-sdk-go/v2/storage_clients"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 func init() {
@@ -25,13 +29,43 @@ func init() {
 }
 
 type S3Client struct {
+	mu     sync.RWMutex
 	client *s3.Client
+	cfg    aws.Config
+}
+
+func parseAuthTypeAndRegion(authType string) (string, string) {
+	parts := strings.SplitN(authType, ";", 2)
+	baseAuth := parts[0]
+	region := ""
+	if len(parts) > 1 {
+		opt := parts[1]
+		if strings.HasPrefix(opt, "region=") {
+			region = strings.TrimPrefix(opt, "region=")
+		}
+	}
+	return baseAuth, region
 }
 
 func NewS3Client(authType string) (*S3Client, error) {
-	var credsProvider aws.CredentialsProvider
-	if strings.HasPrefix(authType, "S3_ACCESS_KEYS[") && strings.HasSuffix(authType, "]") {
-		keysStr := authType[len("S3_ACCESS_KEYS[") : len(authType)-1]
+	var cfg aws.Config
+	var err error
+
+	baseAuth, customRegion := parseAuthTypeAndRegion(authType)
+
+	region := customRegion
+	if region == "" {
+		region = os.Getenv("AWS_REGION")
+		if region == "" {
+			region = os.Getenv("AWS_DEFAULT_REGION")
+			if region == "" {
+				region = "ap-south-1"
+			}
+		}
+	}
+
+	if strings.HasPrefix(baseAuth, "S3_ACCESS_KEYS[") && strings.HasSuffix(baseAuth, "]") {
+		keysStr := baseAuth[len("S3_ACCESS_KEYS[") : len(baseAuth)-1]
 		parts := strings.Split(keysStr, ":")
 		if len(parts) < 2 || len(parts) > 3 {
 			return nil, fmt.Errorf("invalid S3_ACCESS_KEYS format")
@@ -43,32 +77,54 @@ func NewS3Client(authType string) (*S3Client, error) {
 		if len(parts) == 3 {
 			sessionToken = parts[2]
 		}
-		credsProvider = credentials.NewStaticCredentialsProvider(accessKey, secretKey, sessionToken)
-	} else {
-		return nil, fmt.Errorf("only S3_ACCESS_KEYS authentication is supported for S3")
-	}
-
-	region := os.Getenv("AWS_REGION")
-	if region == "" {
-		region = os.Getenv("AWS_DEFAULT_REGION")
-		if region == "" {
-			region = "ap-south-1"
+		credsProvider := credentials.NewStaticCredentialsProvider(accessKey, secretKey, sessionToken)
+		cfg = aws.Config{
+			Region:      region,
+			Credentials: credsProvider,
 		}
+	} else if baseAuth == "DEFAULT" || (strings.HasPrefix(baseAuth, "DEFAULT[") && strings.HasSuffix(baseAuth, "]")) {
+		cfg, err = config.LoadDefaultConfig(context.Background(), config.WithRegion(region))
+		if err != nil {
+			return nil, fmt.Errorf("failed to load default AWS config: %w", err)
+		}
+
+		if strings.HasPrefix(baseAuth, "DEFAULT[") {
+			roleARN := baseAuth[len("DEFAULT[") : len(baseAuth)-1]
+			if roleARN == "" {
+				return nil, fmt.Errorf("empty role ARN provided in DEFAULT[...] authType")
+			}
+			stsClient := sts.NewFromConfig(cfg)
+			provider := stscreds.NewAssumeRoleProvider(stsClient, roleARN)
+			cfg.Credentials = aws.NewCredentialsCache(provider)
+		}
+	} else {
+		return nil, fmt.Errorf("unsupported authType for S3 client: %q", authType)
 	}
 
-	client := s3.New(s3.Options{
-		Region:      region,
-		Credentials: credsProvider,
-	})
+	client := s3.NewFromConfig(cfg)
 
 	return &S3Client{
 		client: client,
+		cfg:    cfg,
 	}, nil
+}
+
+func (u *S3Client) getClient() *s3.Client {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.client
+}
+
+func (u *S3Client) SetRegion(region string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.cfg.Region = region
+	u.client = s3.NewFromConfig(u.cfg)
 }
 
 func (u *S3Client) ListBuckets(ctx context.Context, compartmentID string) ([]string, error) {
 	// For S3, CompartmentID is ignored, list all buckets
-	resp, err := u.client.ListBuckets(ctx, &s3.ListBucketsInput{})
+	resp, err := u.getClient().ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +145,7 @@ func (u *S3Client) ListObjects(ctx context.Context, bucket, prefix string) ([]st
 			Prefix:            aws.String(prefix),
 			ContinuationToken: continuationToken,
 		}
-		resp, err := u.client.ListObjectsV2(ctx, req)
+		resp, err := u.getClient().ListObjectsV2(ctx, req)
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +174,7 @@ func (u *S3Client) GetObjectSize(ctx context.Context, bucket, key string) (int64
 		Key:    aws.String(key),
 	}
 
-	resp, err := u.client.HeadObject(ctx, input)
+	resp, err := u.getClient().HeadObject(ctx, input)
 	if err != nil {
 		return 0, fmt.Errorf("failed to head object: %w", err)
 	}
@@ -151,7 +207,7 @@ func (u *S3Client) GetObjectRange(ctx context.Context, bucket, key string, start
 		Range:  aws.String(rangeHeader),
 	}
 
-	resp, err := u.client.GetObject(ctx, input)
+	resp, err := u.getClient().GetObject(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object range: %w", err)
 	}
@@ -167,7 +223,7 @@ func (u *S3Client) Initiate(ctx context.Context, bucket, key string) (string, er
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		resp, err := u.client.CreateMultipartUpload(ctx, input)
+		resp, err := u.getClient().CreateMultipartUpload(ctx, input)
 		if err == nil {
 			return *resp.UploadId, nil
 		}
@@ -189,7 +245,7 @@ func (u *S3Client) UploadPart(ctx context.Context, bucket, key, uploadID string,
 			Body:          bytes.NewReader(data),
 		}
 
-		resp, err := u.client.UploadPart(ctx, input)
+		resp, err := u.getClient().UploadPart(ctx, input)
 		input.Body = nil
 		if err == nil && resp.ETag != nil {
 			etag := string([]byte(*resp.ETag))
@@ -232,7 +288,7 @@ func (u *S3Client) Complete(ctx context.Context, bucket, key, uploadID string, e
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		_, err := u.client.CompleteMultipartUpload(ctx, input)
+		_, err := u.getClient().CompleteMultipartUpload(ctx, input)
 		if err == nil {
 			return nil
 		}
@@ -251,7 +307,7 @@ func (u *S3Client) PutObject(ctx context.Context, bucket, key string, data []byt
 			ContentLength: aws.Int64(int64(len(data))),
 			Body:          bytes.NewReader(data),
 		}
-		_, err := u.client.PutObject(ctx, input)
+		_, err := u.getClient().PutObject(ctx, input)
 		input.Body = nil
 		if err == nil {
 			return nil
@@ -270,7 +326,7 @@ func (u *S3Client) Abort(ctx context.Context, bucket, key, uploadID string) erro
 	}
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		_, err := u.client.AbortMultipartUpload(ctx, input)
+		_, err := u.getClient().AbortMultipartUpload(ctx, input)
 		if err == nil || strings.Contains(err.Error(), "NoSuchUpload") || strings.Contains(err.Error(), "404") {
 			return nil
 		}
@@ -287,7 +343,7 @@ func (u *S3Client) DeleteObject(ctx context.Context, bucket, key string) error {
 	}
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		_, err := u.client.DeleteObject(ctx, input)
+		_, err := u.getClient().DeleteObject(ctx, input)
 		if err == nil {
 			return nil
 		}
@@ -295,9 +351,4 @@ func (u *S3Client) DeleteObject(ctx context.Context, bucket, key string) error {
 		time.Sleep(time.Duration(1<<attempt-1) * time.Second)
 	}
 	return fmt.Errorf("delete object failed: %w", lastErr)
-}
-
-func (u *S3Client) SetRegion(region string) {
-	// S3 client region is configured during creation or environment variables.
-	// This is a noop for general compatibility.
 }
