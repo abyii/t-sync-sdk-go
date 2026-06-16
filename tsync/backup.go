@@ -212,6 +212,11 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	// Apply filter and validate path components upfront
 	var entries []SourceEntry
 	for _, entry := range allEntries {
+		// Skip directory entries
+		if strings.HasSuffix(entry.Path, "/") {
+			continue
+		}
+
 		if opts.FilterFunc != nil {
 			keep, err := opts.FilterFunc(entry.Path)
 			if err != nil {

@@ -1088,3 +1088,63 @@ func TestTsyncPerFileCompressionCallback(t *testing.T) {
 		t.Errorf("restored dat content mismatch")
 	}
 }
+
+type mockSource struct {
+	entries []SourceEntry
+}
+
+func (m *mockSource) ListEntries(ctx context.Context) ([]SourceEntry, error) {
+	return m.entries, nil
+}
+
+func TestTsyncSkipDirectoryEntries(t *testing.T) {
+	vmPub, _, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	mockSrc := &mockSource{
+		entries: []SourceEntry{
+			{
+				Path: "folder/", // explicit directory node
+				Size: 0,
+			},
+			{
+				Path: "folder/file.txt",
+				Size: 12,
+				Open: func() (io.ReadCloser, error) {
+					return io.NopCloser(strings.NewReader("hello world!")), nil
+				},
+			},
+		},
+	}
+
+	destStore := NewMemStorage()
+	client := NewClient(destStore)
+
+	v, err := client.Backup(context.Background(), mockSrc, BackupOptions{
+		Label:      "skip-dirs-run",
+		KeyID:      "key-1",
+		PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+	})
+	if err != nil {
+		t.Fatalf("backup failed: %v", err)
+	}
+
+	// Verify that the backup succeeded and has version ID
+	if v.SnowflakeId == 0 {
+		t.Errorf("expected non-zero SnowflakeId")
+	}
+
+	// Verify only "folder/file.txt" is registered in metadata files pool
+	sm, err := client.ReadMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("failed to read metadata: %v", err)
+	}
+
+	filesMap := sm.Files()
+	if len(filesMap) != 1 {
+		t.Errorf("expected exactly 1 file record, got %d", len(filesMap))
+	}
+}
+
