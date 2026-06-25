@@ -44,6 +44,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	_ = srcStore.Write(context.Background(), "file1.txt", []byte("Hello World, T-Sync Go SDK!"))
 	_ = srcStore.Write(context.Background(), "folder/file2.bin", randomBytes(100))
 	_ = srcStore.Write(context.Background(), "folder/subfolder/file3.dat", []byte("Deeply nested file"))
+	_ = srcStore.Write(context.Background(), "folder/subfolder/.gitkeep", []byte(""))
 	_ = srcStore.Write(context.Background(), "extra1.txt", []byte("extra file 1"))
 	_ = srcStore.Write(context.Background(), "extra2.txt", []byte("extra file 2"))
 	_ = srcStore.Write(context.Background(), "extra3.txt", []byte("extra file 3"))
@@ -164,18 +165,18 @@ func TestTsyncFullLifecycle(t *testing.T) {
 		t.Fatalf("failed to parse rekeyed zip: %v", err)
 	}
 
-	// Verify that the file is encrypted
-	if !zrEnc.File[0].IsEncrypted() {
-		t.Fatalf("expected file to be encrypted")
+	// Open all files with password should succeed (including 0-byte .gitkeep)
+	for _, ef := range zrEnc.File {
+		if !ef.IsEncrypted() {
+			t.Fatalf("expected all files in rekeyed zip to be encrypted, but %s was not", ef.Name)
+		}
+		ef.SetPassword("newPasswordSec")
+		rc, err := ef.Open()
+		if err != nil {
+			t.Fatalf("failed to open file %s with new password: %v", ef.Name, err)
+		}
+		rc.Close()
 	}
-
-	// Open with password should succeed
-	zrEnc.File[0].SetPassword("newPasswordSec")
-	rc, err := zrEnc.File[0].Open()
-	if err != nil {
-		t.Fatalf("failed to open file with new password: %v", err)
-	}
-	rc.Close()
 
 	// 5. Restore with skip decryption errors
 	// Inject a corrupted FileRecord with bad keys to simulate a corruption
