@@ -212,11 +212,6 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	// Apply filter and validate path components upfront
 	var entries []SourceEntry
 	for _, entry := range allEntries {
-		// Skip directory entries
-		if strings.HasSuffix(entry.Path, "/") {
-			continue
-		}
-
 		if opts.FilterFunc != nil {
 			keep, err := opts.FilterFunc(entry.Path)
 			if err != nil {
@@ -227,8 +222,13 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 			}
 		}
 
+		if entry.Path == "" {
+			return nil, fmt.Errorf("invalid empty path entry")
+		}
+
 		// Validate name components
-		parts := strings.Split(entry.Path, "/")
+		cleanPath := strings.TrimSuffix(entry.Path, "/")
+		parts := strings.Split(cleanPath, "/")
 		for _, part := range parts {
 			if err := validateName(part); err != nil {
 				return nil, fmt.Errorf("invalid path component in %q: %w", entry.Path, err)
@@ -380,6 +380,15 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 					continue
 				}
 				entry := t.entry
+
+				if entry.IsDir || strings.HasSuffix(entry.Path, "/") {
+					resultChan <- result{
+						path:   entry.Path,
+						key:    "",
+						record: nil,
+					}
+					continue
+				}
 
 				// A. Check if the file part already exists in the metadata files pool
 				var fileKey string
@@ -666,14 +675,19 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	// 5. Gather results
 	newPathToFileKey := make(map[string]string)
 	newFilesPool := make(map[string]*tsyncv2.FileRecord)
+	dirPaths := make(map[string]bool)
 
 	doneCount := 0
 	for res := range resultChan {
 		if res.err != nil {
 			return nil, res.err
 		}
-		newPathToFileKey[res.path] = res.key
-		newFilesPool[res.key] = res.record
+		if res.key != "" && res.record != nil {
+			newPathToFileKey[res.path] = res.key
+			newFilesPool[res.key] = res.record
+		} else if res.path != "" {
+			dirPaths[strings.TrimSuffix(res.path, "/")] = true
+		}
 
 		doneCount++
 		if opts.OnProgress != nil {
@@ -683,6 +697,25 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 
 	// Build the directory tree structure
 	rootNode := newTempDirNode()
+
+	// 1. Add directories (including empty ones)
+	for dPath := range dirPaths {
+		if dPath == "" {
+			continue
+		}
+		parts := strings.Split(dPath, "/")
+		curr := rootNode
+		for _, part := range parts {
+			subdir, exists := curr.subdirs[part]
+			if !exists {
+				subdir = newTempDirNode()
+				curr.subdirs[part] = subdir
+			}
+			curr = subdir
+		}
+	}
+
+	// 2. Add files
 	for p, fileKey := range newPathToFileKey {
 		parts := strings.Split(p, "/")
 		curr := rootNode

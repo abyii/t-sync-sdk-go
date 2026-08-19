@@ -39,28 +39,24 @@ type RestoreOptions struct {
 	OnProgress func(done, total int, path string)
 }
 
-// ResolveVersionMap resolves a Version's path-to-key mapping by walking the directory tree.
-func ResolveVersionMap(metadata *tsyncv2.BackupMetadata, versionID uint64) (map[string]string, error) {
-	return ResolveVersionMapWithOptions(metadata, versionID, false)
-}
-
-// ResolveVersionMapWithOptions resolves a Version's path-to-key mapping with optional best-effort validation skipping.
-func ResolveVersionMapWithOptions(metadata *tsyncv2.BackupMetadata, versionID uint64, skipValidationErrors bool) (map[string]string, error) {
+// ResolveVersionTree resolves a Version's file and empty directory mappings by walking the directory tree.
+func ResolveVersionTree(metadata *tsyncv2.BackupMetadata, versionID uint64, skipValidationErrors bool) (files map[string]string, emptyDirs []string, err error) {
 	vStr := strconv.FormatUint(versionID, 10)
 	version, exists := metadata.Versions[vStr]
 	if !exists {
-		return nil, fmt.Errorf("version %d not found in backup metadata", versionID)
+		return nil, nil, fmt.Errorf("version %d not found in backup metadata", versionID)
 	}
 
-	result := make(map[string]string)
-	err := walkTree(version.RootTreeHash, "", metadata.Trees, skipValidationErrors, result)
+	filesResult := make(map[string]string)
+	var dirsResult []string
+	err = walkTree(version.RootTreeHash, "", metadata.Trees, skipValidationErrors, filesResult, &dirsResult)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return result, nil
+	return filesResult, dirsResult, nil
 }
 
-func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode, skipValidationErrors bool, result map[string]string) error {
+func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode, skipValidationErrors bool, filesResult map[string]string, dirsResult *[]string) error {
 	node, exists := trees[treeHash]
 	if !exists {
 		err := fmt.Errorf("tree node %s not found in metadata trees map", treeHash)
@@ -107,6 +103,12 @@ func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode
 		prevName = entry.Name
 	}
 
+	// Empty tree node -> empty directory
+	if len(node.Entries) == 0 && prefix != "" {
+		*dirsResult = append(*dirsResult, prefix)
+		return nil
+	}
+
 	// 3. Walk entries
 	for _, entry := range node.Entries {
 		if err := validateName(entry.Name); err != nil {
@@ -133,7 +135,7 @@ func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode
 				return err2
 			}
 			fileKey := fmt.Sprintf("%08x_%d", n.File.Crc32, n.File.UncompressedSize)
-			result[fullPath] = fileKey
+			filesResult[fullPath] = fileKey
 		case *tsyncv2.TreeEntry_SubtreeHash:
 			if n.SubtreeHash == "" {
 				err2 := fmt.Errorf("subtree hash is empty for entry %s", entry.Name)
@@ -143,7 +145,7 @@ func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode
 				}
 				return err2
 			}
-			err := walkTree(n.SubtreeHash, fullPath, trees, skipValidationErrors, result)
+			err := walkTree(n.SubtreeHash, fullPath, trees, skipValidationErrors, filesResult, dirsResult)
 			if err != nil {
 				return err
 			}
@@ -176,22 +178,29 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 		return fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
 	}
 
-	// 2. Resolve the version file map
-	resolvedMap, err := ResolveVersionMapWithOptions(&metadata, versionID, opts.SkipValidationErrors)
+	// 2. Resolve the version file and empty directory map
+	resolvedMap, rawEmptyDirs, err := ResolveVersionTree(&metadata, versionID, opts.SkipValidationErrors)
 	if err != nil {
 		return fmt.Errorf("failed to resolve version map: %w", err)
 	}
 
 	// 3. Apply selective restore filters
 	filteredMap := make(map[string]string)
+	var emptyDirs []string
 	if len(opts.FilesToRestore) > 0 {
 		targets := make(map[string]bool)
 		for _, f := range opts.FilesToRestore {
 			targets[f] = true
+			targets[strings.TrimSuffix(f, "/")] = true
 		}
 		for path, fileKey := range resolvedMap {
 			if targets[path] {
 				filteredMap[path] = fileKey
+			}
+		}
+		for _, dPath := range rawEmptyDirs {
+			if targets[dPath] || targets[dPath+"/"] {
+				emptyDirs = append(emptyDirs, dPath)
 			}
 		}
 	} else {
@@ -202,6 +211,15 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 				}
 			} else {
 				filteredMap[path] = fileKey
+			}
+		}
+		for _, dPath := range rawEmptyDirs {
+			if opts.FilterFunc != nil {
+				if opts.FilterFunc(dPath) || opts.FilterFunc(dPath+"/") {
+					emptyDirs = append(emptyDirs, dPath)
+				}
+			} else {
+				emptyDirs = append(emptyDirs, dPath)
 			}
 		}
 	}
@@ -416,6 +434,16 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 			}
 		}
 
+		// Recreate empty directories on disk
+		for _, dPath := range emptyDirs {
+			cleanDirPath := filepath.Clean(filepath.Join(opts.ExtractDir, filepath.FromSlash(dPath)))
+			cleanExtractDir := filepath.Clean(opts.ExtractDir)
+			rel, err := filepath.Rel(cleanExtractDir, cleanDirPath)
+			if err == nil && !strings.HasPrefix(rel, "..") {
+				_ = os.MkdirAll(cleanDirPath, 0755)
+			}
+		}
+
 		return nil
 	}
 
@@ -481,6 +509,20 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 		doneCount++
 		if opts.OnProgress != nil {
 			opts.OnProgress(doneCount, len(filteredMap), path)
+		}
+	}
+
+	// Recreate empty directory headers in reconstructed ZIP
+	for _, dPath := range emptyDirs {
+		dirName := dPath
+		if !strings.HasSuffix(dirName, "/") {
+			dirName += "/"
+		}
+		wDir, err := zipw.Create(dirName, zip.Store, 0, zip.NoEncryption, "")
+		if err == nil && wDir != nil {
+			if c, ok := wDir.(io.Closer); ok {
+				_ = c.Close()
+			}
 		}
 	}
 

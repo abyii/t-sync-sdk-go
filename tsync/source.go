@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	zip "github.com/abyii/zip-xxh3"
@@ -16,6 +17,7 @@ type SourceEntry struct {
 	CompressedSize int64 // Compressed size in bytes (if known, e.g. from zip source)
 	LastModified   time.Time
 	CRC32          uint32 // Original CRC32 (if known, e.g. from a zip file)
+	IsDir          bool   // True if the entry represents a directory
 
 	// Open returns a read closer for the raw, uncompressed, unencrypted content.
 	// Used when IsEncryptedRaw is false.
@@ -64,14 +66,19 @@ func (s *FolderSource) ListEntries(ctx context.Context) ([]SourceEntry, error) {
 	var entries []SourceEntry
 	for _, f := range files {
 		fileInfo := f
-		entries = append(entries, SourceEntry{
+		isDir := strings.HasSuffix(fileInfo.Name, "/")
+		entry := SourceEntry{
 			Path:         fileInfo.Name,
 			Size:         fileInfo.Size,
 			LastModified: fileInfo.LastModified,
-			Open: func() (io.ReadCloser, error) {
+			IsDir:        isDir,
+		}
+		if !isDir {
+			entry.Open = func() (io.ReadCloser, error) {
 				return s.store.OpenReader(context.Background(), fileInfo.Name)
-			},
-		})
+			}
+		}
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
@@ -110,39 +117,43 @@ func (s *ZipFileSource) ListEntries(ctx context.Context) ([]SourceEntry, error) 
 	for _, r := range ranges {
 		partRange := r
 
+		isDir := strings.HasSuffix(partRange.Name, "/")
 		entry := SourceEntry{
 			Path:           partRange.Name,
 			Size:           int64(partRange.File.UncompressedSize64),
 			CompressedSize: int64(partRange.File.CompressedSize64),
 			LastModified:   MSDosTimeToTime(partRange.File.ModifiedDate, partRange.File.ModifiedTime),
 			CRC32:          partRange.File.CRC32,
+			IsDir:          isDir,
 		}
 
-		if s.isEncrypted {
-			entry.IsEncryptedRaw = true
-			entry.OpenRaw = func() (io.ReadCloser, error) {
-				// Read exactly the range of this part directly from storage
-				return s.store.ReadRange(context.Background(), s.zipPath, partRange.StartOffset, partRange.EndOffset-partRange.StartOffset)
-			}
-		} else {
-			entry.Open = func() (io.ReadCloser, error) {
-				return partRange.File.Open()
-			}
-			entry.CompressionMethod = partRange.File.Method
-			entry.OpenRawCompressed = func() (io.ReadCloser, error) {
-				rc, err := s.store.ReadRange(context.Background(), s.zipPath, partRange.StartOffset, partRange.EndOffset-partRange.StartOffset)
-				if err != nil {
-					return nil, err
+		if !isDir {
+			if s.isEncrypted {
+				entry.IsEncryptedRaw = true
+				entry.OpenRaw = func() (io.ReadCloser, error) {
+					// Read exactly the range of this part directly from storage
+					return s.store.ReadRange(context.Background(), s.zipPath, partRange.StartOffset, partRange.EndOffset-partRange.StartOffset)
 				}
-				_, err = zip.ReadLocalFileHeader(rc)
-				if err != nil {
-					rc.Close()
-					return nil, err
+			} else {
+				entry.Open = func() (io.ReadCloser, error) {
+					return partRange.File.Open()
 				}
-				return &limitReadCloser{
-					r: io.LimitReader(rc, int64(partRange.File.CompressedSize64)),
-					c: rc,
-				}, nil
+				entry.CompressionMethod = partRange.File.Method
+				entry.OpenRawCompressed = func() (io.ReadCloser, error) {
+					rc, err := s.store.ReadRange(context.Background(), s.zipPath, partRange.StartOffset, partRange.EndOffset-partRange.StartOffset)
+					if err != nil {
+						return nil, err
+					}
+					_, err = zip.ReadLocalFileHeader(rc)
+					if err != nil {
+						rc.Close()
+						return nil, err
+					}
+					return &limitReadCloser{
+						r: io.LimitReader(rc, int64(partRange.File.CompressedSize64)),
+						c: rc,
+					}, nil
+				}
 			}
 		}
 

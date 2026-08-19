@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	tsyncv2 "github.com/abyii/t-sync-sdk-go/v2/gen/go/com/github/abyii/tsync/v2"
@@ -77,7 +78,7 @@ func (c *Client) ListFiles(ctx context.Context, versionID uint64) ([]string, err
 		return nil, fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
 	}
 
-	resolvedMap, err := ResolveVersionMap(&metadata, versionID)
+	resolvedMap, emptyDirs, err := ResolveVersionTree(&metadata, versionID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +86,13 @@ func (c *Client) ListFiles(ctx context.Context, versionID uint64) ([]string, err
 	var paths []string
 	for p := range resolvedMap {
 		paths = append(paths, p)
+	}
+	for _, d := range emptyDirs {
+		dirPath := d
+		if !strings.HasSuffix(dirPath, "/") {
+			dirPath += "/"
+		}
+		paths = append(paths, dirPath)
 	}
 	return paths, nil
 }

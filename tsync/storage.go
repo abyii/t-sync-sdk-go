@@ -106,24 +106,32 @@ func (l *LocalStorage) List(ctx context.Context, prefix string) ([]FileInfo, err
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 
-		// Match prefix
 		relPath, err := filepath.Rel(l.rootDir, path)
 		if err != nil {
 			return err
 		}
 		relSlash := filepath.ToSlash(relPath)
+		if relSlash == "." || relSlash == "" {
+			return nil
+		}
+
+		if d.IsDir() {
+			relSlash += "/"
+		}
+
 		if strings.HasPrefix(relSlash, prefix) {
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
+			size := info.Size()
+			if d.IsDir() {
+				size = 0
+			}
 			files = append(files, FileInfo{
 				Name:         relSlash,
-				Size:         info.Size(),
+				Size:         size,
 				LastModified: info.ModTime(),
 			})
 		}

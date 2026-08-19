@@ -95,7 +95,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	var metadata tsyncv2.BackupMetadata
 	_ = proto.Unmarshal(pbBytes, &metadata)
 
-	v2Map, err := ResolveVersionMap(&metadata, v2.SnowflakeId)
+	v2Map, _, err := ResolveVersionTree(&metadata, v2.SnowflakeId, false)
 	if err != nil {
 		t.Fatalf("failed to resolve v2 map: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	}
 
 	// Verify we can still resolve v2 successfully
-	v2MapAfterDelete, err := ResolveVersionMap(&updatedMetadata, v2.SnowflakeId)
+	v2MapAfterDelete, _, err := ResolveVersionTree(&updatedMetadata, v2.SnowflakeId, false)
 	if err != nil {
 		t.Fatalf("failed to resolve version v2 after deleting v1: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestTsyncFullLifecycle(t *testing.T) {
 	}
 
 	// The store should only contain part files referenced by v3
-	v3Map, err := ResolveVersionMap(&singleMetadata, v3.SnowflakeId)
+	v3Map, _, err := ResolveVersionTree(&singleMetadata, v3.SnowflakeId, false)
 	if err != nil {
 		t.Fatalf("failed to resolve v3 map: %v", err)
 	}
@@ -1024,7 +1024,7 @@ func TestTsyncPerFileCompressionCallback(t *testing.T) {
 		t.Fatalf("failed to read metadata: %v", err)
 	}
 
-	resolvedMap, err := ResolveVersionMap(sm.metadata, v.SnowflakeId)
+	resolvedMap, _, err := ResolveVersionTree(sm.metadata, v.SnowflakeId, false)
 	if err != nil {
 		t.Fatalf("failed to resolve version map: %v", err)
 	}
@@ -1147,5 +1147,343 @@ func TestTsyncSkipDirectoryEntries(t *testing.T) {
 	if len(filesMap) != 1 {
 		t.Errorf("expected exactly 1 file record, got %d", len(filesMap))
 	}
+}
+
+func TestTsyncEmptyFoldersBackupAndRestore(t *testing.T) {
+	vmPub, vmPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	t.Run("FileSystem Source -> Backup -> Restore ExtractDir & ZipWriter", func(t *testing.T) {
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "file1.txt", []byte("file1 content"))
+		_ = srcStore.Write(context.Background(), "nested/file2.txt", []byte("file2 content"))
+		_ = srcStore.Write(context.Background(), "empty_folder/", []byte(""))
+		_ = srcStore.Write(context.Background(), "nested/empty_subfolder/", []byte(""))
+		_ = srcStore.Write(context.Background(), "deeply/nested/empty_deep/", []byte(""))
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		v, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+			Label:      "fs-empty-folder-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup failed: %v", err)
+		}
+
+		// A. Restore to ExtractDir
+		tmpDir, err := os.MkdirTemp("", "tsync-empty-dir-test-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore to ExtractDir failed: %v", err)
+		}
+
+		// Verify files
+		if content, err := os.ReadFile(filepath.Join(tmpDir, "file1.txt")); err != nil || string(content) != "file1 content" {
+			t.Errorf("file1.txt mismatch: %v, %s", err, string(content))
+		}
+		if content, err := os.ReadFile(filepath.Join(tmpDir, "nested", "file2.txt")); err != nil || string(content) != "file2 content" {
+			t.Errorf("nested/file2.txt mismatch: %v, %s", err, string(content))
+		}
+
+		// Verify empty folders exist on disk and are directories
+		emptyDirsToVerify := []string{
+			filepath.Join(tmpDir, "empty_folder"),
+			filepath.Join(tmpDir, "nested", "empty_subfolder"),
+			filepath.Join(tmpDir, "deeply", "nested", "empty_deep"),
+		}
+		for _, d := range emptyDirsToVerify {
+			fi, err := os.Stat(d)
+			if err != nil {
+				t.Errorf("expected empty folder %s to exist on disk, got error: %v", d, err)
+			} else if !fi.IsDir() {
+				t.Errorf("expected %s to be a directory", d)
+			}
+		}
+
+		// B. Restore to ZipWriter
+		var zipBuf bytes.Buffer
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ZipWriter:  &zipBuf,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore to ZipWriter failed: %v", err)
+		}
+
+		// Parse restored ZIP and verify empty folder headers exist
+		zr, err := zip.NewReader(bytes.NewReader(zipBuf.Bytes()), int64(zipBuf.Len()))
+		if err != nil {
+			t.Fatalf("failed to parse restored ZIP: %v", err)
+		}
+
+		zipEntries := make(map[string]*zip.File)
+		for _, f := range zr.File {
+			zipEntries[f.Name] = f
+		}
+
+		expectedZipDirs := []string{"empty_folder/", "nested/empty_subfolder/", "deeply/nested/empty_deep/"}
+		for _, zd := range expectedZipDirs {
+			zf, ok := zipEntries[zd]
+			if !ok {
+				t.Errorf("expected zip entry %q in restored ZIP archive", zd)
+			} else if !strings.HasSuffix(zf.Name, "/") {
+				t.Errorf("expected zip entry %q to end with '/'", zd)
+			}
+		}
+	})
+
+	t.Run("ZipFileSource with Empty Folders -> Backup -> Restore", func(t *testing.T) {
+		// Construct source ZIP containing empty folder entries
+		var srcZipBuf bytes.Buffer
+		zipw := zip.NewWriter(&srcZipBuf)
+
+		w1, _ := zipw.Create("data.txt", zip.Store, 0, zip.NoEncryption, "")
+		_, _ = w1.Write([]byte("zip file data"))
+		if c, ok := w1.(io.Closer); ok {
+			_ = c.Close()
+		}
+
+		wDir1, _ := zipw.Create("zip_empty_dir/", zip.Store, 0, zip.NoEncryption, "")
+		if c, ok := wDir1.(io.Closer); ok {
+			_ = c.Close()
+		}
+
+		wDir2, _ := zipw.Create("zip_nested/empty_sub/", zip.Store, 0, zip.NoEncryption, "")
+		if c, ok := wDir2.(io.Closer); ok {
+			_ = c.Close()
+		}
+
+		_ = zipw.Close()
+
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "source.zip", srcZipBuf.Bytes())
+
+		zipSrc := NewZipFileSource(srcStore, "source.zip", false)
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		v, err := client.Backup(context.Background(), zipSrc, BackupOptions{
+			Label:      "zip-src-empty-dirs-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup from ZipFileSource failed: %v", err)
+		}
+
+		// Restore to ExtractDir
+		tmpDir, err := os.MkdirTemp("", "tsync-zip-src-extract-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore to ExtractDir failed: %v", err)
+		}
+
+		fi1, err1 := os.Stat(filepath.Join(tmpDir, "zip_empty_dir"))
+		fi2, err2 := os.Stat(filepath.Join(tmpDir, "zip_nested", "empty_sub"))
+		if err1 != nil || !fi1.IsDir() {
+			t.Errorf("zip_empty_dir not restored properly: %v", err1)
+		}
+		if err2 != nil || !fi2.IsDir() {
+			t.Errorf("zip_nested/empty_sub not restored properly: %v", err2)
+		}
+
+		// Restore to ZipWriter
+		var outZipBuf bytes.Buffer
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ZipWriter:  &outZipBuf,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore to ZipWriter failed: %v", err)
+		}
+
+		zrOut, err := zip.NewReader(bytes.NewReader(outZipBuf.Bytes()), int64(outZipBuf.Len()))
+		if err != nil {
+			t.Fatalf("failed to parse output ZIP: %v", err)
+		}
+
+		outEntries := make(map[string]bool)
+		for _, f := range zrOut.File {
+			outEntries[f.Name] = true
+		}
+
+		if !outEntries["zip_empty_dir/"] {
+			t.Errorf("expected zip_empty_dir/ in output ZIP")
+		}
+		if !outEntries["zip_nested/empty_sub/"] {
+			t.Errorf("expected zip_nested/empty_sub/ in output ZIP")
+		}
+	})
+
+	t.Run("Zip64 Source with Empty Folders -> Backup -> Restore", func(t *testing.T) {
+		// Construct Zip64 archive containing empty directory headers
+		var zip64Buf bytes.Buffer
+		zipw := zip.NewWriter(&zip64Buf)
+
+		// Force Zip64 extra field format on file header
+		fhFile := &zip.FileHeader{
+			Name:               "large_marker.txt",
+			Method:             zip.Store,
+			UncompressedSize64: 4294967296, // 4GB+ to trigger Zip64
+			CompressedSize64:   4294967296,
+		}
+		wFile, err := zipw.CreateHeader(fhFile)
+		if err == nil && wFile != nil {
+			if c, ok := wFile.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+
+		// Add empty directory in Zip64 archive
+		fhDir := &zip.FileHeader{
+			Name:   "zip64_empty_dir/",
+			Method: zip.Store,
+		}
+		wDir, err := zipw.CreateHeader(fhDir)
+		if err == nil && wDir != nil {
+			if c, ok := wDir.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+
+		_ = zipw.Close()
+
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "zip64_source.zip", zip64Buf.Bytes())
+
+		zipSrc := NewZipFileSource(srcStore, "zip64_source.zip", false)
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		v, err := client.Backup(context.Background(), zipSrc, BackupOptions{
+			Label:      "zip64-empty-dir-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup from Zip64 source with empty dir failed: %v", err)
+		}
+
+		// Restore to ExtractDir
+		tmpDir, err := os.MkdirTemp("", "tsync-zip64-extract-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore from Zip64 backup failed: %v", err)
+		}
+
+		fiDir, err := os.Stat(filepath.Join(tmpDir, "zip64_empty_dir"))
+		if err != nil || !fiDir.IsDir() {
+			t.Errorf("zip64_empty_dir not restored as directory: %v", err)
+		}
+
+		// Restore to ZipWriter
+		var zip64OutBuf bytes.Buffer
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ZipWriter:  &zip64OutBuf,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore Zip64 to ZipWriter failed: %v", err)
+		}
+
+		zr64Out, err := zip.NewReader(bytes.NewReader(zip64OutBuf.Bytes()), int64(zip64OutBuf.Len()))
+		if err != nil {
+			t.Fatalf("failed to parse Zip64 restored output ZIP: %v", err)
+		}
+
+		z64Entries := make(map[string]bool)
+		for _, f := range zr64Out.File {
+			z64Entries[f.Name] = true
+		}
+		if !z64Entries["zip64_empty_dir/"] {
+			t.Errorf("expected zip64_empty_dir/ in output ZIP")
+		}
+	})
+
+	t.Run("Rekeying and FilterFunc with Empty Folders", func(t *testing.T) {
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "keep_file.txt", []byte("keep content"))
+		_ = srcStore.Write(context.Background(), "keep_empty/", []byte(""))
+		_ = srcStore.Write(context.Background(), "ignore_empty/", []byte(""))
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		v, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+			Label:      "rekey-filter-empty-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup failed: %v", err)
+		}
+
+		// Restore with FilterFunc skipping ignore_empty
+		var rekeyedZipBuf bytes.Buffer
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ZipWriter:   &rekeyedZipBuf,
+			PrivateKey:  vmPriv[:],
+			NewPassword: "rekeyedPassword123",
+			FilterFunc: func(p string) bool {
+				return !strings.HasPrefix(p, "ignore_empty")
+			},
+		})
+		if err != nil {
+			t.Fatalf("rekeyed restore failed: %v", err)
+		}
+
+		zrRekey, err := zip.NewReader(bytes.NewReader(rekeyedZipBuf.Bytes()), int64(rekeyedZipBuf.Len()))
+		if err != nil {
+			t.Fatalf("failed to parse rekeyed ZIP: %v", err)
+		}
+
+		rekeyedFiles := make(map[string]*zip.File)
+		for _, f := range zrRekey.File {
+			rekeyedFiles[f.Name] = f
+		}
+
+		if _, ok := rekeyedFiles["ignore_empty/"]; ok {
+			t.Errorf("expected ignore_empty/ to be filtered out")
+		}
+
+		if zf, ok := rekeyedFiles["keep_empty/"]; !ok || !strings.HasSuffix(zf.Name, "/") {
+			t.Errorf("expected keep_empty/ in rekeyed ZIP")
+		}
+
+		if zf, ok := rekeyedFiles["keep_file.txt"]; !ok || !zf.IsEncrypted() {
+			t.Errorf("expected keep_file.txt to be present and encrypted with new password")
+		}
+	})
 }
 
