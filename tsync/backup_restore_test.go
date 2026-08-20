@@ -1577,5 +1577,61 @@ func TestTsyncEmptyFoldersBackupAndRestore(t *testing.T) {
 			t.Errorf("expected keep_file.txt to be present and encrypted with new password")
 		}
 	})
+
+	t.Run("Only Empty Folders (0 files) -> Backup -> Restore", func(t *testing.T) {
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "sole_empty_dir/", []byte(""))
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		v, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+			Label:      "zero-files-empty-dir-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err != nil {
+			t.Fatalf("backup of 0 files with empty folder failed: %v", err)
+		}
+
+		tmpDir, err := os.MkdirTemp("", "tsync-zero-files-extract-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+			ExtractDir: tmpDir,
+			PrivateKey: vmPriv[:],
+		})
+		if err != nil {
+			t.Fatalf("restore of 0-file empty dir failed: %v", err)
+		}
+
+		fi, err := os.Stat(filepath.Join(tmpDir, "sole_empty_dir"))
+		if err != nil || !fi.IsDir() {
+			t.Errorf("sole_empty_dir not restored properly: %v", err)
+		}
+	})
+
+	t.Run("Empty Folder Path Traversal Protection Rejection", func(t *testing.T) {
+		srcStore := NewMemStorage()
+		_ = srcStore.Write(context.Background(), "../../../traversal_dir/", []byte(""))
+
+		destStore := NewMemStorage()
+		client := NewClient(destStore)
+
+		_, err := client.Backup(context.Background(), NewFolderSource(srcStore, ""), BackupOptions{
+			Label:      "traversal-empty-dir-run",
+			KeyID:      "key-1",
+			PublicKeys: map[string][]byte{"key-1": vmPub[:]},
+		})
+		if err == nil {
+			t.Fatalf("expected backup to fail due to directory traversal '..', but it succeeded")
+		}
+		if !strings.Contains(err.Error(), "directory traversal sentinel \"..\"") {
+			t.Errorf("expected error to mention traversal sentinel, got: %v", err)
+		}
+	})
 }
 
