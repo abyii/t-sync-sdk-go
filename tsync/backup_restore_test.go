@@ -542,6 +542,98 @@ func TestTsyncEncryptedZipSource(t *testing.T) {
 	}
 }
 
+func TestTsyncEncryptedZipSourceWithLeadingDirectory(t *testing.T) {
+	vmPub, vmPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+
+	srcStore := NewMemStorage()
+	var zipBuf bytes.Buffer
+	zipw := zip.NewWriter(&zipBuf)
+
+	clearZipPass, err := GenerateZipCryptoPassword()
+	if err != nil {
+		t.Fatalf("failed to generate password: %v", err)
+	}
+
+	ephPub, encPass, err := EncryptPassword(clearZipPass, vmPub[:])
+	if err != nil {
+		t.Fatalf("failed to encrypt password: %v", err)
+	}
+
+	// 1. Add an empty directory FIRST in the ZIP archive
+	_, err = zipw.Create("TestData/", zip.Store, 0, zip.NoEncryption, "")
+	if err != nil {
+		t.Fatalf("failed to create dir header: %v", err)
+	}
+
+	// 2. Add an encrypted file AFTER the directory
+	w, err := zipw.Create("TestData/secret.txt", zip.Deflate, -1, zip.StandardEncryption, clearZipPass)
+	if err != nil {
+		t.Fatalf("failed to create zip header: %v", err)
+	}
+	_, _ = w.Write([]byte("encrypted data with leading dir"))
+	_ = zipw.Close()
+
+	zipPath := "encrypted-leading-dir.zip"
+	_ = srcStore.Write(context.Background(), zipPath, zipBuf.Bytes())
+
+	zipSrc := NewZipFileSource(srcStore, zipPath, true)
+	destStore := NewMemStorage()
+	client := NewClient(destStore)
+
+	v, err := client.Backup(context.Background(), zipSrc, BackupOptions{
+		Label:             "encrypted-leading-dir-run",
+		KeyID:             "key-1",
+		PublicKeys:        map[string][]byte{"key-1": vmPub[:]},
+		EphPublicKey:      ephPub,
+		EncryptedPassword: encPass,
+	})
+	if err != nil {
+		t.Fatalf("backup failed: %v", err)
+	}
+
+	// Restore and reconstruct to ZIP with NewPassword = "restored_pass"
+	var restoreZipBuf bytes.Buffer
+	err = client.Restore(context.Background(), v.SnowflakeId, RestoreOptions{
+		ZipWriter:   &restoreZipBuf,
+		PrivateKey:  vmPriv[:],
+		NewPassword: "restored_pass",
+	})
+	if err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(restoreZipBuf.Bytes()), int64(restoreZipBuf.Len()))
+	if err != nil {
+		t.Fatalf("failed to read restored zip: %v", err)
+	}
+
+	foundFile := false
+	for _, f := range zr.File {
+		if f.Name == "TestData/secret.txt" {
+			foundFile = true
+			f.SetPassword("restored_pass")
+			rc, err := f.Open()
+			if err != nil {
+				t.Fatalf("failed to open restored file with restored_pass: %v", err)
+			}
+			data, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				t.Fatalf("failed to read restored content: %v", err)
+			}
+			if string(data) != "encrypted data with leading dir" {
+				t.Errorf("content mismatch: got %q", string(data))
+			}
+		}
+	}
+	if !foundFile {
+		t.Fatalf("TestData/secret.txt not found in restored ZIP")
+	}
+}
+
 func TestTsyncCompressionLevels(t *testing.T) {
 	vmPub, vmPriv, err := box.GenerateKey(rand.Reader)
 	if err != nil {

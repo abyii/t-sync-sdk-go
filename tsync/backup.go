@@ -298,15 +298,20 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	var clearZipPass string
 	var selectedKeyID string
 
-	// Determine if the source is already encrypted
-	isSrcEncrypted := false
-	if len(entries) > 0 && entries[0].IsEncryptedRaw {
-		isSrcEncrypted = true
+	// Determine if the source is already encrypted by checking explicit caller options or entry flags
+	isSrcEncrypted := len(opts.EncryptedPassword) > 0 || len(opts.EphPublicKey) > 0
+	if !isSrcEncrypted {
+		for _, e := range entries {
+			if !e.IsDir && e.IsEncryptedRaw {
+				isSrcEncrypted = true
+				break
+			}
+		}
 	}
 
 	if isSrcEncrypted {
 		if len(opts.EphPublicKey) == 0 || len(opts.EncryptedPassword) == 0 {
-			return nil, fmt.Errorf("pre-encrypted source requires providing EphPublicKey and EncryptedPassword in options")
+			return nil, fmt.Errorf("pre-encrypted source requires providing both EphPublicKey and EncryptedPassword in options")
 		}
 		ephPubKey = opts.EphPublicKey
 		encryptedZipPass = opts.EncryptedPassword
