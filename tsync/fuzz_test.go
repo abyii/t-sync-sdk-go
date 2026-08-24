@@ -142,16 +142,21 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 				case 0: // Add or edit file
 					p := genRandomPath(rng.Intn(5) == 0)
 					var data []byte
-					sizeKind := rng.Intn(4)
+					sizeKind := rng.Intn(6)
 					switch sizeKind {
 					case 0: // 0-byte file
 						data = []byte("")
-					case 1: // Small file
+					case 1: // 1-byte file
+						data = []byte{byte(rng.Intn(256))}
+					case 2: // 2-byte file
+						data = []byte{byte(rng.Intn(256)), byte(rng.Intn(256))}
+					case 3: // Tiny file (3–15 bytes)
+						data = make([]byte, rng.Intn(13)+3)
+						rng.Read(data)
+					case 4: // Small string payload (30-35 B)
 						data = []byte(fmt.Sprintf("small payload %d", rng.Int63()))
-					case 2: // Medium file (30 KB)
+					case 5: // Medium file (30 KB)
 						data = bytes.Repeat([]byte{byte(rng.Intn(256))}, 30*1024)
-					case 3: // Compressible file (100 KB)
-						data = bytes.Repeat([]byte("PATTERNDATA_"), 10*1024)
 					}
 					_ = srcStore.Write(ctx, p, data)
 					currentSourceSnapshot.files[p] = data
