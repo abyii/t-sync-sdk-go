@@ -6,8 +6,6 @@ import (
 	"io"
 	"strings"
 	"time"
-
-	zip "github.com/abyii/zip-xxh3"
 )
 
 // SourceEntry represents an individual file in a backup source.
@@ -139,21 +137,6 @@ func (s *ZipFileSource) ListEntries(ctx context.Context) ([]SourceEntry, error) 
 					return partRange.File.Open()
 				}
 				entry.CompressionMethod = partRange.File.Method
-				entry.OpenRawCompressed = func() (io.ReadCloser, error) {
-					rc, err := s.store.ReadRange(context.Background(), s.zipPath, partRange.StartOffset, partRange.EndOffset-partRange.StartOffset)
-					if err != nil {
-						return nil, err
-					}
-					_, err = zip.ReadLocalFileHeader(rc)
-					if err != nil {
-						rc.Close()
-						return nil, err
-					}
-					return &limitReadCloser{
-						r: io.LimitReader(rc, int64(partRange.File.CompressedSize64)),
-						c: rc,
-					}, nil
-				}
 			}
 		}
 

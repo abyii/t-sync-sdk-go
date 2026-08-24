@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tsyncv2 "github.com/abyii/t-sync-sdk-go/v2/gen/go/com/github/abyii/tsync/v2"
@@ -21,6 +22,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+var globalVersionSeq uint64
 
 // BackupOptions configures the backup operation.
 type BackupOptions struct {
@@ -761,6 +764,16 @@ func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions
 	versionID := opts.CustomVersionID
 	if versionID == 0 {
 		versionID = hashStringToUint64(strconv.FormatInt(time.Now().UnixNano(), 10))
+		if metadata.Versions != nil {
+			for {
+				vKey := strconv.FormatUint(versionID, 10)
+				if metadata.Versions[vKey] == nil {
+					break
+				}
+				seq := atomic.AddUint64(&globalVersionSeq, 1)
+				versionID = hashStringToUint64(fmt.Sprintf("%d-%d", time.Now().UnixNano(), seq))
+			}
+		}
 	}
 	backupTime := time.Now()
 	if !opts.CustomBackupTimestamp.IsZero() {

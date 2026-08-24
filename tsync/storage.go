@@ -115,6 +115,11 @@ func (l *LocalStorage) List(ctx context.Context, prefix string) ([]FileInfo, err
 		if relSlash == "." || relSlash == "" {
 			return nil
 		}
+		// Only process regular files and directories; ignore symlinks, sockets, pipes, devices, etc.
+		mode := d.Type()
+		if !mode.IsRegular() && !d.IsDir() {
+			return nil
+		}
 
 		if d.IsDir() {
 			relSlash += "/"
