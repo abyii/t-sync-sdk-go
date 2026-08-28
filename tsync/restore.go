@@ -163,6 +163,10 @@ func walkTree(treeHash string, prefix string, trees map[string]*tsyncv2.TreeNode
 
 // RunRestore performs the ZIP reconstruction or extraction.
 func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts RestoreOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// 1. Read metadata
 	metadataBytes, err := dest.Read(ctx, ".tsync")
 	if err != nil {
