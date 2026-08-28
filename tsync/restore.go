@@ -166,6 +166,12 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if opts.ExtractDir == "" && opts.ZipWriter == nil {
+		return fmt.Errorf("either ZipWriter or ExtractDir must be set in RestoreOptions")
+	}
+	if len(opts.PrivateKey) > 0 && len(opts.PrivateKey) != 32 {
+		return fmt.Errorf("invalid PrivateKey in RestoreOptions: expected 32 bytes (NaCl Curve25519), got %d (check if an RSA/PEM key was passed by mistake)", len(opts.PrivateKey))
+	}
 
 	// 1. Read metadata
 	metadataBytes, err := dest.Read(ctx, ".tsync")

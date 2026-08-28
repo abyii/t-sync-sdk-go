@@ -174,7 +174,24 @@ func (n *tempDirNode) buildAndHash(trees map[string]*tsyncv2.TreeNode) (string, 
 }
 
 func RunBackup(ctx context.Context, src Source, dest Storage, opts BackupOptions) (*tsyncv2.Version, error) {
-	// 0. Validate custom options if passed
+	// 0. Validate input options upfront
+	for k, pk := range opts.PublicKeys {
+		if len(pk) != 32 {
+			return nil, fmt.Errorf("invalid public key length for key ID %q: expected 32 bytes (NaCl Curve25519), got %d (check if an RSA/PEM key was passed by mistake)", k, len(pk))
+		}
+	}
+	if len(opts.EphPublicKey) > 0 && len(opts.EphPublicKey) != 32 {
+		return nil, fmt.Errorf("invalid EphPublicKey in BackupOptions: expected 32 bytes (NaCl Curve25519), got %d", len(opts.EphPublicKey))
+	}
+	if len(opts.EncryptedPassword) > 0 && len(opts.EncryptedPassword) < 40 {
+		return nil, fmt.Errorf("invalid EncryptedPassword in BackupOptions: must be at least 40 bytes (24-byte nonce + 16-byte Poly1305 tag), got %d", len(opts.EncryptedPassword))
+	}
+	if opts.KeyID != "" && len(opts.PublicKeys) > 0 {
+		if _, exists := opts.PublicKeys[opts.KeyID]; !exists {
+			return nil, fmt.Errorf("selected public key ID %q not found in BackupOptions.PublicKeys", opts.KeyID)
+		}
+	}
+
 	if opts.CustomVersionID != 0 {
 		if opts.CustomVersionID > 9223372036854775807 {
 			return nil, fmt.Errorf("invalid custom version ID: %d (must be <= 9223372036854775807)", opts.CustomVersionID)
