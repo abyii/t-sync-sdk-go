@@ -411,6 +411,7 @@ The SDK features comprehensive test coverage split into domain-specific test sui
 * `backup_restore_test.go`: Comprehensive lifecycle integration verification.
 * `storage_test.go`: Local filesystem integration testing.
 * `client_test.go`: Wrapped metadata checks.
+* `path_names_test.go`: Exact round-trip of odd archive names (`\`, traversal-looking, UNC/drive-looking) and `ExtractDir` safety; `fuzz_test.go` fuzzes the same name classes.
 
 To run all tests:
 ```bash

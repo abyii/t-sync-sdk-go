@@ -39,7 +39,11 @@ func verifyZipExplorerExtractable(t *testing.T, zipBytes []byte, password string
 		t.Fatalf("verifyZipExplorerExtractable: failed to parse ZIP structure: %v", err)
 	}
 
+	windowsExtractable := true
 	for _, f := range zr.File {
+		if !isPathExtractableOn(f.Name, "windows") {
+			windowsExtractable = false
+		}
 		if f.FileInfo().IsDir() {
 			continue
 		}
@@ -64,8 +68,9 @@ func verifyZipExplorerExtractable(t *testing.T, zipBytes []byte, password string
 	}
 
 	// 2. On Windows OS, execute native PowerShell Expand-Archive for unencrypted ZIPs in standard unit tests.
-	// Skip external powershell.exe process spawning during high-frequency parallel fuzzing to avoid OS handle exhaustion.
-	if runtime.GOOS == "windows" && password == "" && !strings.HasPrefix(t.Name(), "Fuzz") {
+	// Skip external powershell.exe process spawning during high-frequency parallel fuzzing to avoid OS handle exhaustion,
+	// and skip archives whose entry names (e.g. `a\b`, `x:y`) cannot exist as Windows paths.
+	if runtime.GOOS == "windows" && password == "" && windowsExtractable && !strings.HasPrefix(t.Name(), "Fuzz") {
 		tmpZip, err := os.CreateTemp("", "tsync-verify-win-*.zip")
 		if err == nil {
 			_, _ = tmpZip.Write(zipBytes)

@@ -24,7 +24,6 @@ func TestTsyncV2ValidationAndBestEffort(t *testing.T) {
 			"foo/./bar",
 			"foo//bar",
 			"foo/bar\x00baz",
-			"foo/bar\\baz",
 			"",
 			strings.Repeat("a", 256),
 		}

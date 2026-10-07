@@ -90,6 +90,8 @@ func (tw *trackingWriter) Write(p []byte) (int, error) {
 }
 
 // validateName validates a single name component for directory or file entries.
+// `/` is the only path separator in tree paths; `\` is an ordinary name byte so that
+// archive names are preserved exactly as the source stores them.
 func validateName(name string) error {
 	if len(name) == 0 {
 		return fmt.Errorf("name cannot be empty")
@@ -97,10 +99,10 @@ func validateName(name string) error {
 	if len(name) > 255 {
 		return fmt.Errorf("name exceeds maximum length of 255 bytes: %q", name)
 	}
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		c := name[i]
-		if c == '/' || c == '\\' {
-			return fmt.Errorf("name contains illegal character %q: %q", c, name)
+		if c == '/' {
+			return fmt.Errorf("name contains path separator '/': %q", name)
 		}
 		if c == 0 {
 			return fmt.Errorf("name contains null byte: %q", name)

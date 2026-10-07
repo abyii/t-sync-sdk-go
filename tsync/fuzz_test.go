@@ -9,6 +9,7 @@ import (
 	mrand "math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,105 @@ func (s *oracleVersionSnapshot) clone() oracleVersionSnapshot {
 	return oracleVersionSnapshot{
 		files:     cpFiles,
 		emptyDirs: cpDirs,
+	}
+}
+
+// Valid-but-odd directory components. None of them equals a leaf name, so files and
+// directories never collide on the same path.
+var fuzzWeirdDirComponents = []string{
+	`bs\dir`, `ünïcødé dir`, ` lead space`, `..cfg`, `\\unc\share`, `C:\root`,
+	`中文目录`, `q#%&{}[]`, `aux`, `trail dot.`,
+}
+
+// Valid-but-odd leaf names (formatted with a number for variety). Backslashes are
+// ordinary name bytes; several only look like traversal/UNC/drive paths on Windows.
+var fuzzWeirdLeafFormats = []string{
+	`%d_back\slash.txt`, `\%d_leading.txt`, `%d_trailing\`, `..\%d_up.txt`, `.\%d_dot.txt`,
+	`a\..\..\%d_esc.txt`, `%d_mixed\sub\file.txt`, `..%d_dots.txt`, `...%d`, `%d_trailing dot.`,
+	`%d_trailing space.txt `, ` %d_leading space.txt`, `%d_ünïcødé-文件-😀.txt`, `%d_star*?<>|:"q.txt`,
+	"%d_tab\tctrl\x01\x7f.txt", `%d_%%2e%%2e%%2f.txt`, `nul.%d.txt`,
+}
+
+// Paths that must always be rejected by Backup.
+var fuzzInvalidPaths = []string{
+	"inv/../x.txt", "inv/./x.txt", "inv//x.txt", "/abs.txt", "inv/nul\x00.txt", "..", ".",
+	"inv/" + strings.Repeat("a", 256), "inv/" + strings.Repeat("é", 128),
+}
+
+func genWeirdPath(rng *mrand.Rand) string {
+	var parts []string
+	for range rng.Intn(3) {
+		parts = append(parts, fuzzWeirdDirComponents[rng.Intn(len(fuzzWeirdDirComponents))])
+	}
+	n := rng.Intn(50)
+	var leaf string
+	if rng.Intn(10) == 0 {
+		prefix := fmt.Sprintf("%d_max_", n)
+		leaf = prefix + strings.Repeat("x", 255-len(prefix)) // exactly the 255-byte limit
+	} else {
+		leaf = fmt.Sprintf(fuzzWeirdLeafFormats[rng.Intn(len(fuzzWeirdLeafFormats))], n)
+	}
+	return strings.Join(append(parts, leaf), "/")
+}
+
+func snapshotExtractableOnHost(s oracleVersionSnapshot) bool {
+	for p := range s.files {
+		if !isPathExtractableOn(p, runtime.GOOS) {
+			return false
+		}
+	}
+	for d := range s.emptyDirs {
+		if !isPathExtractableOn(d, runtime.GOOS) {
+			return false
+		}
+	}
+	return true
+}
+
+// expectedEmptyDirs returns the snapshot's explicit directories that are still empty;
+// a directory with any descendant is implied by its children and gets no ZIP entry.
+func expectedEmptyDirs(s oracleVersionSnapshot) map[string]bool {
+	out := make(map[string]bool)
+	for d := range s.emptyDirs {
+		prefix := d + "/"
+		empty := true
+		for p := range s.files {
+			if strings.HasPrefix(p, prefix) {
+				empty = false
+				break
+			}
+		}
+		for other := range s.emptyDirs {
+			if empty && strings.HasPrefix(other, prefix) {
+				empty = false
+			}
+		}
+		if empty {
+			out[d] = true
+		}
+	}
+	return out
+}
+
+// assertZipMatchesSnapshot checks that a restored ZIP holds exactly the snapshot's
+// entry names (byte-for-byte) and contents.
+func assertZipMatchesSnapshot(t *testing.T, step int, zipBytes []byte, password string, s oracleVersionSnapshot) {
+	t.Helper()
+	gotFiles, gotDirs := readZipEntries(t, zipBytes, password)
+	assertZipFilesEqual(t, gotFiles, s.files)
+	wantDirs := expectedEmptyDirs(s)
+	for d := range wantDirs {
+		if !gotDirs[d] {
+			t.Errorf("restored zip is missing empty dir %q", d)
+		}
+	}
+	for d := range gotDirs {
+		if !wantDirs[d] {
+			t.Errorf("restored zip has unexpected dir entry %q", d)
+		}
+	}
+	if t.Failed() {
+		t.Fatalf("fuzz step %d: restored zip does not match source snapshot", step)
 	}
 }
 
@@ -92,7 +192,7 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 		emptyDirs: make(map[string]bool),
 	}
 
-	// Helper to generate a random path (including deep paths up to 100 levels)
+	// Helper to generate a random path (including deep paths up to 100 levels and odd names)
 	genRandomPath := func(forceDeep bool) string {
 		if forceDeep || rng.Intn(4) == 0 {
 			// Generate deep tree depth up to 100 levels
@@ -103,6 +203,9 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 			}
 			parts = append(parts, fmt.Sprintf("leaf_%d.txt", rng.Intn(100)))
 			return strings.Join(parts, "/")
+		}
+		if rng.Intn(3) == 0 {
+			return genWeirdPath(rng)
 		}
 
 		prefixes := []string{"", "docs/", "sub/folder/", "nested/deep/", ".config/", "space dir/"}
@@ -134,6 +237,36 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 			// ---------------------------------------------------------
 			// ACTION: BACKUP
 			// ---------------------------------------------------------
+			// Occasionally prove that a source with an invalid path is rejected
+			// without touching the store.
+			if rng.Intn(10) == 0 {
+				bad := fuzzInvalidPaths[rng.Intn(len(fuzzInvalidPaths))]
+				badFiles := map[string][]byte{"valid.txt": []byte("ok"), bad: []byte("bad")}
+				var badSource Source
+				if rng.Intn(2) == 0 {
+					badStore := NewMemStorage()
+					for k, v := range badFiles {
+						_ = badStore.Write(ctx, k, v)
+					}
+					badSource = NewFolderSource(badStore, "")
+				} else {
+					zipStore := NewMemStorage()
+					_ = zipStore.Write(ctx, "bad.zip", buildTestZip(t, badFiles, nil, ""))
+					badSource = NewZipFileSource(zipStore, "bad.zip", false)
+				}
+				before, _ := client.ListVersions(ctx)
+				if _, err := client.Backup(ctx, badSource, BackupOptions{
+					Label:      "fuzz-invalid",
+					PublicKeys: map[string][]byte{"fuzz-key-1": vmPub[:]},
+				}); err == nil {
+					t.Fatalf("fuzz step %d: backup accepted invalid path %q", step, bad)
+				}
+				after, _ := client.ListVersions(ctx)
+				if len(after) != len(before) {
+					t.Fatalf("fuzz step %d: rejected backup of %q changed version count %d -> %d", step, bad, len(before), len(after))
+				}
+			}
+
 			// Mutate source state randomly
 			mutationCount := rng.Intn(4) + 1
 			for m := 0; m < mutationCount; m++ {
@@ -161,12 +294,19 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 					_ = srcStore.Write(ctx, p, data)
 					currentSourceSnapshot.files[p] = data
 				case 1: // Create empty directory
-					depth := rng.Intn(95) + 5
-					var parts []string
-					for k := 1; k <= depth; k++ {
-						parts = append(parts, fmt.Sprintf("dir_lvl%d", k))
+					var dPath string
+					if rng.Intn(3) == 0 {
+						// Odd-named empty directory; the leaf is never used for files.
+						dPath = fuzzWeirdDirComponents[rng.Intn(len(fuzzWeirdDirComponents))] +
+							fmt.Sprintf(`/empty\leaf_%d/`, rng.Intn(1000))
+					} else {
+						depth := rng.Intn(95) + 5
+						var parts []string
+						for k := 1; k <= depth; k++ {
+							parts = append(parts, fmt.Sprintf("dir_lvl%d", k))
+						}
+						dPath = strings.Join(parts, "/") + "/"
 					}
-					dPath := strings.Join(parts, "/") + "/"
 					_ = srcStore.Write(ctx, dPath, []byte(""))
 					currentSourceSnapshot.emptyDirs[strings.TrimSuffix(dPath, "/")] = true
 				case 2: // Delete existing file or empty dir
@@ -277,6 +417,11 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 			snapshot := versionSnapshots[targetVer]
 
 			restoreType := rng.Intn(3) // 0: ExtractDir, 1: ZipWriter, 2: Rekeyed Zip
+			if restoreType == 0 && !snapshotExtractableOnHost(snapshot) {
+				// Names like `a\b` or `x:y` cannot exist 1:1 on this OS's filesystem;
+				// verify the archive round-trip instead.
+				restoreType = 1
+			}
 			switch restoreType {
 			case 0:
 				tmpDir, err := os.MkdirTemp("", "fuzz-restore-*")
@@ -324,6 +469,7 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 					t.Fatalf("fuzz step %d: Restore to ZipWriter failed for version %d: %v", step, targetVer, rErr)
 				}
 				verifyZipExplorerExtractable(t, zipBuf.Bytes(), "")
+				assertZipMatchesSnapshot(t, step, zipBuf.Bytes(), "", snapshot)
 
 			case 2: // Rekeyed Encrypted ZipWriter
 				var encZipBuf bytes.Buffer
@@ -337,6 +483,7 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 					t.Fatalf("fuzz step %d: Restore to rekeyed ZipWriter failed for version %d: %v", step, targetVer, rErr)
 				}
 				verifyZipExplorerExtractable(t, encZipBuf.Bytes(), newPass)
+				assertZipMatchesSnapshot(t, step, encZipBuf.Bytes(), newPass, snapshot)
 			}
 
 		} else if opChoice < 90 && len(activeVersionIDs) > 1 {
@@ -367,6 +514,7 @@ func runFuzzEngine(t *testing.T, seed int64, totalSteps int) {
 					t.Fatalf("fuzz step %d: restore of version %d failed after deleting version %d: %v", step, remVer, verToDelete, rErr)
 				}
 				verifyZipExplorerExtractable(t, remBuf.Bytes(), "")
+				assertZipMatchesSnapshot(t, step, remBuf.Bytes(), "", versionSnapshots[remVer])
 			}
 
 		} else {

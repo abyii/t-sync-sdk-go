@@ -303,7 +303,7 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 						cleanOutPath := filepath.Clean(outPath)
 						cleanExtractDir := filepath.Clean(opts.ExtractDir)
 						rel, err := filepath.Rel(cleanExtractDir, cleanOutPath)
-						if err != nil || strings.HasPrefix(rel, "..") {
+						if err != nil || rel == "." || relEscapesBase(rel) {
 							return fmt.Errorf("illegal file path (directory traversal): %s", t.path)
 						}
 
@@ -449,7 +449,7 @@ func RunRestore(ctx context.Context, dest Storage, versionID uint64, opts Restor
 			cleanDirPath := filepath.Clean(filepath.Join(opts.ExtractDir, filepath.FromSlash(dPath)))
 			cleanExtractDir := filepath.Clean(opts.ExtractDir)
 			rel, err := filepath.Rel(cleanExtractDir, cleanDirPath)
-			if err == nil && !strings.HasPrefix(rel, "..") {
+			if err == nil && !relEscapesBase(rel) {
 				_ = os.MkdirAll(cleanDirPath, 0755)
 			}
 		}
@@ -554,6 +554,12 @@ func calculateFileCRC32(filePath string) (uint32, error) {
 		return 0, err
 	}
 	return h.Sum32(), nil
+}
+
+// relEscapesBase reports whether a filepath.Rel result points outside its base.
+// Names such as "..a" or "..cfg" are ordinary children, not traversal.
+func relEscapesBase(rel string) bool {
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func getExistingAncestor(path string) string {

@@ -7,6 +7,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+**Name validation (spec §TreeEntry, §10) — SDK `tsync` package**
+
+- `\` (0x5C) is now an ordinary byte in `TreeEntry.name`. Only `/` separates path
+  components. ZIP sources whose entry names contain `\` (e.g. `dir/a\b.txt`, can now be backed up and are restored to a ZIP
+  with byte-identical entry names. `a\b.txt` and `a/b.txt` are distinct entries.
+- Error for a `/` inside a name component changed from
+  `name contains illegal character '/': "<name>"` to
+  `name contains path separator '/': "<name>"`.
+- Still rejected: empty components, `.`, `..`, null bytes, components longer than 255 bytes.
+
+**Restore to `ExtractDir`**
+
+- On Linux/macOS a `\` in a name is written literally (`a\b.txt` is one file).
+- On Windows the OS treats `\` as a separator, so `a\b.txt` is extracted as `a/b.txt`.
+  Names that would land outside `ExtractDir` (e.g. `..\up.txt`) fail with
+  `illegal file path (directory traversal)`. ZIP→ZIP restore is unaffected and exact.
+
+### Fixed
+
+- Restore to `ExtractDir` no longer rejects names that merely start with `..`
+  (e.g. `..a.txt`, `..cfg/x.txt`) as directory traversal, and no longer skips such
+  empty directories. Only paths that actually resolve outside `ExtractDir` are rejected.
+
+### Compatibility with older SDK versions
+
+- **Stores written by older SDKs:** fully readable by this version. Nothing in the
+  `.tsync` format changed: no proto change, same tree hashing, `schema_version` stays `2`.
+- **Stores written by this version, read by SDK v2.0.0–v2.0.11:** versions without `\`
+  in any name are unaffected. Older SDKs still reject `\` when they validate tree entry
+  names, so once any version in a store contains a name with `\`:
+  - `Restore` / `ListFiles` of a version containing `\` fail with
+    `name contains illegal character '\\'`. With `RestoreOptions.SkipValidationErrors`
+    the entry is skipped with a warning instead; if the `\` is in a directory name, the
+    whole subtree is skipped.
+  - `DeleteVersion` and `GC` walk **every** version in the store, so a single version
+    containing `\` makes them fail for the whole store, including unrelated versions.
+  - `Backup` from an older SDK into such a store still succeeds (it does not walk existing
+    trees), but a source containing `\` is still rejected by the older SDK.
+- **Recommendation:** upgrade every reader/writer of a store (backup agents, restore
+  agents, GC jobs) before backing up sources whose names contain `\`.
+- **Known limitation (unchanged):** `TreeEntry.name` is a proto3 `string`, so names that
+  are not valid UTF-8 (e.g. raw Shift-JIS/CP437 ZIP names) fail at backup with
+  `failed to marshal tree node: string field contains invalid UTF-8`.
+
 ---
 
 ## [2.0.0] — Content-addressed hash tree
@@ -18,6 +64,7 @@ Both packages coexist on BSR; clients migrate on their own schedule.
 ### Added
 
 **`metadata.proto`**
+
 - `TreeNode` message — content-addressed directory node, keyed by SHA-256 of its canonical serialized bytes
 - `TreeEntry` message — one item in a TreeNode: either a `FileLeaf` or a `subtree_hash`
 - `FileLeaf` message — file reference carrying `crc32` + `uncompressed_size` to form the compound key
@@ -26,22 +73,26 @@ Both packages coexist on BSR; clients migrate on their own schedule.
 - `FileRecord.crc32` — CRC-32 restored for self-contained identity
 
 **`t_sync.proto`**
+
 - `BackupMetadata.trees` — content-addressed tree store (`map<string, TreeNode>`), shared across versions
 - `BackupMetadata.schema_version` — always `2` for v2 messages
 
 ### Changed
 
 **`metadata.proto`**
+
 - `Version` no longer uses FULL/DELTA model — every version is a complete snapshot via its root tree hash
 - `Version.parent_id` renamed to `Version.preceding_version_id` (informational only, not structural)
 - Compound key separator remains `_` (unchanged from v1: `<crc32_hex>_<uncompressed_size>`)
 
 **`t_sync.proto`**
+
 - `BackupMetadata.versions` field number shifted from 1→1 (unchanged), `files` from 2→3, `public_keys` from 3→4, `schema_version` from 4→5, `store_label` from 5→6, `last_updated` from 6→7 (to accommodate new `trees` field at 2)
 
 ### Removed
 
 **`metadata.proto`**
+
 - `VersionKind` enum (`VERSION_KIND_UNSPECIFIED`, `VERSION_KIND_FULL`, `VERSION_KIND_DELTA`) — no longer needed; every version is a full snapshot
 - `Version.kind` — removed with `VersionKind`
 - `Version.path_to_file_key` — replaced by root tree hash + tree walk
@@ -55,6 +106,7 @@ Both packages coexist on BSR; clients migrate on their own schedule.
 ### Added
 
 **`t_sync.proto`**
+
 - `BackupMetadata.versions` — map of all backup versions keyed by snowflake_id (decimal string)
 - `BackupMetadata.files` — content-addressable file records keyed by compound file key (`<crc32_hex>_<uncompressed_size>`)
 - `BackupMetadata.public_keys` — VM long-lived public keys keyed by key_id
@@ -63,6 +115,7 @@ Both packages coexist on BSR; clients migrate on their own schedule.
 - `BackupMetadata.last_updated` — timestamp of last metadata write
 
 **`metadata.proto`**
+
 - `VersionKind` enum: `VERSION_KIND_UNSPECIFIED (0)`, `VERSION_KIND_FULL (1)`, `VERSION_KIND_DELTA (2)`
 - `Version.snowflake_id` — fixed64 unique version identifier
 - `Version.backup_timestamp` — wall-clock time of snapshot

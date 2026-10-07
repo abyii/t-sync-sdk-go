@@ -65,7 +65,9 @@ TreeEntry {
 
 **Name validation rules:**
 - Must not be empty.
-- Must not contain `/` or `\`.
+- Must not contain `/` (the only path separator in tree paths).
+  `\` is an ordinary name byte: names are stored exactly as the source archive
+  stores them (e.g. `a\b.txt` is one entry, distinct from `a/b.txt`).
 - Must not contain null bytes (0x00).
 - Must not be the literal name `.` or `..` (directory traversal entries).
   Dots within normal filenames (e.g. `main.go`) are valid.
@@ -278,7 +280,9 @@ there are many files (same convention as Git's object store).
 A conforming implementation must:
 
 - Reject any `BackupMetadata` with `schema_version != 2`
-- Reject any `TreeEntry` with an empty `name` or a `name` containing `/`, `\`, null bytes, or the literal `.` or `..`
+- Reject any `TreeEntry` with an empty `name` or a `name` containing `/`, null bytes, or the literal `.` or `..`
+- Accept `\` in `TreeEntry.name` as an ordinary byte; implementations that extract to a
+  filesystem where `\` is a separator must keep the result inside the target directory
 - Reject any `TreeEntry` where neither `file` nor `subtree_hash` is set
 - Reject any `TreeNode` whose entries are not sorted by `name` (byte-order)
 - Correctly implement the canonical serialization algorithm in §4 and verify
