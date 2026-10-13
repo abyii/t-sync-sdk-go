@@ -23,3 +23,7 @@ func osGetFreeSpace(path string) (uint64, error) {
 
 	return freeBytesAvailable, nil
 }
+
+// syncDir is a no-op on Windows: directories cannot be opened for FlushFileBuffers by
+// os.Open, and NTFS journals the rename metadata itself.
+func syncDir(dir string) error { return nil }

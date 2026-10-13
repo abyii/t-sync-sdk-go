@@ -47,5 +47,5 @@ func GetClient(provider, authType, namespace string) (ObjectStorageClient, error
 	if factory, ok := registry[provider]; ok {
 		return factory(authType, namespace)
 	}
-	return nil, fmt.Errorf("provider '%s' is not supported in this build", provider)
+	return nil, fmt.Errorf("%w: provider %q is not supported in this build", ErrUnsupportedProvider, provider)
 }

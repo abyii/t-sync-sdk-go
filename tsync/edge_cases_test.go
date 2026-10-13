@@ -206,11 +206,11 @@ func (m *mockObjectStorageClient) ListBuckets(ctx context.Context, prefix string
 }
 
 func (m *mockObjectStorageClient) GetObjectSize(ctx context.Context, bucket, key string) (int64, error) {
-	return 0, os.ErrNotExist
+	return 0, fmt.Errorf("%w: %s", storage_clients.ErrNotFound, key)
 }
 
 func (m *mockObjectStorageClient) GetObjectRange(ctx context.Context, bucket, key string, offset, length int64) (io.ReadCloser, error) {
-	return nil, os.ErrNotExist
+	return nil, fmt.Errorf("%w: %s", storage_clients.ErrNotFound, key)
 }
 
 func (m *mockObjectStorageClient) PutObject(ctx context.Context, bucket, key string, data []byte) error {
@@ -258,7 +258,7 @@ func (m *mockObjectStorageClient) Abort(ctx context.Context, bucket, key, upload
 
 func TestTsyncObjectStorageMultipartFaultInjection(t *testing.T) {
 	mockClient := &mockObjectStorageClient{
-		failUploadPartAt: 2, // Fail on 2nd 5MB multipart chunk
+		failUploadPartAt: 2, // Fail on the 2nd multipart chunk
 	}
 
 	objStore := NewObjectStorage(mockClient, "test-bucket", "backup-prefix")
@@ -267,7 +267,7 @@ func TestTsyncObjectStorageMultipartFaultInjection(t *testing.T) {
 		t.Fatalf("failed to open writer: %v", err)
 	}
 
-	// Write 12MB of data to trigger multipart upload (5MB threshold per part)
+	// Write 12MB of data to trigger multipart upload (initialPartSize threshold per part)
 	chunk := make([]byte, 1024*1024) // 1MB chunk
 	var writeErr error
 	for i := 0; i < 12; i++ {

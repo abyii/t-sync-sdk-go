@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -171,8 +172,8 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to duplicate version ID, but got nil")
-	} else if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("expected 'already exists' error, got: %v", err)
+	} else if !errors.Is(err, ErrVersionIDExists) {
+		t.Errorf("expected ErrVersionIDExists, got: %v", err)
 	}
 
 	// 3. Test Out-of-bounds Version ID Error
@@ -185,8 +186,8 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to out-of-bounds version ID, but got nil")
-	} else if !strings.Contains(err.Error(), "invalid custom version ID") {
-		t.Errorf("expected 'invalid custom version ID' error, got: %v", err)
+	} else if !errors.Is(err, ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions, got: %v", err)
 	}
 
 	// 4. Test Future Custom Timestamp Error
@@ -199,8 +200,8 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to future timestamp, but got nil")
-	} else if !strings.Contains(err.Error(), "is in the future") {
-		t.Errorf("expected 'is in the future' error, got: %v", err)
+	} else if !errors.Is(err, ErrTimestampInFuture) {
+		t.Errorf("expected ErrTimestampInFuture, got: %v", err)
 	}
 
 	// 5. Test Custom Timestamp before Latest Version Error
@@ -214,8 +215,8 @@ func TestTsyncCustomVersionAndTimestamp(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected error due to timestamp before latest version, but got nil")
-	} else if !strings.Contains(err.Error(), "must be after the latest version's backup timestamp") {
-		t.Errorf("expected 'must be after the latest version's' error, got: %v", err)
+	} else if !errors.Is(err, ErrTimestampBeforeLatest) {
+		t.Errorf("expected ErrTimestampBeforeLatest, got: %v", err)
 	}
 }
 

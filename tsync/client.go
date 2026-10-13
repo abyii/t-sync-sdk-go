@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"path"
 	"regexp"
 	"sort"
@@ -17,6 +19,31 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// fileKeyRegex matches a well-formed file-record key ("<crc32 hex>_<uncompressed size>").
+var fileKeyRegex = regexp.MustCompile(`^[0-9a-f]{8}_[0-9]+$`)
+
+// partKeyRegex matches a sharded file-part object key, e.g. "1a/1a2b3c4d_12345".
+var partKeyRegex = regexp.MustCompile(`^[0-9a-f]{2}/[0-9a-f]{8}_[0-9]+$`)
+
+// loadMetadata reads and parses the store's .tsync file.
+// Errors: a read failure is wrapped as-is (errors.Is(err, ErrNotFound) when the store has
+// no .tsync yet); an unparsable file wraps ErrCorruptMetadata; a schema other than 2 is an
+// *UnsupportedSchemaError (matches ErrUnsupportedSchema).
+func loadMetadata(ctx context.Context, store Storage) (*tsyncv2.BackupMetadata, error) {
+	pbBytes, err := store.Read(ctx, ".tsync")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read .tsync metadata: %w", err)
+	}
+	var metadata tsyncv2.BackupMetadata
+	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
+		return nil, fmt.Errorf("%w: failed to parse .tsync: %w", ErrCorruptMetadata, err)
+	}
+	if metadata.SchemaVersion != 2 {
+		return nil, &UnsupportedSchemaError{Version: metadata.SchemaVersion}
+	}
+	return &metadata, nil
+}
 
 // Client represents the high-level T-Sync SDK client.
 type Client struct {
@@ -39,20 +66,14 @@ func (c *Client) Restore(ctx context.Context, versionID uint64, opts RestoreOpti
 }
 
 // ListVersions lists all backup versions in the store.
+// A store without a .tsync file has no versions (nil, nil); every other failure is returned.
 func (c *Client) ListVersions(ctx context.Context) ([]*tsyncv2.Version, error) {
-	pbBytes, err := c.store.Read(ctx, ".tsync")
+	metadata, err := loadMetadata(ctx, c.store)
 	if err != nil {
-		// If store doesn't exist yet, return empty list
-		return nil, nil
-	}
-
-	var metadata tsyncv2.BackupMetadata
-	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-
-	if metadata.SchemaVersion != 2 {
-		return nil, fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
 	var versions []*tsyncv2.Version
@@ -64,21 +85,12 @@ func (c *Client) ListVersions(ctx context.Context) ([]*tsyncv2.Version, error) {
 
 // ListFiles lists all file paths in a specific version.
 func (c *Client) ListFiles(ctx context.Context, versionID uint64) ([]string, error) {
-	pbBytes, err := c.store.Read(ctx, ".tsync")
+	metadata, err := loadMetadata(ctx, c.store)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata: %w", err)
+		return nil, err
 	}
 
-	var metadata tsyncv2.BackupMetadata
-	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-
-	if metadata.SchemaVersion != 2 {
-		return nil, fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
-	}
-
-	resolvedMap, emptyDirs, err := ResolveVersionTree(&metadata, versionID, false)
+	resolvedMap, emptyDirs, err := ResolveVersionTree(metadata, versionID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -100,24 +112,15 @@ func (c *Client) ListFiles(ctx context.Context, versionID uint64) ([]string, err
 // DeleteVersion deletes a backup version from the store.
 // Removes orphaned tree nodes and file records from the metadata, and deletes orphaned file parts from the storage.
 func (c *Client) DeleteVersion(ctx context.Context, versionID uint64) error {
-	pbBytes, err := c.store.Read(ctx, ".tsync")
+	metadata, err := loadMetadata(ctx, c.store)
 	if err != nil {
-		return fmt.Errorf("failed to read metadata: %w", err)
-	}
-
-	var metadata tsyncv2.BackupMetadata
-	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
-		return fmt.Errorf("failed to parse metadata: %w", err)
-	}
-
-	if metadata.SchemaVersion != 2 {
-		return fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
+		return err
 	}
 
 	vStr := strconv.FormatUint(versionID, 10)
 	_, exists := metadata.Versions[vStr]
 	if !exists {
-		return fmt.Errorf("version %d not found in store", versionID)
+		return fmt.Errorf("%w: version %d not found in store", ErrVersionNotFound, versionID)
 	}
 
 	// 1. Remove the version
@@ -156,7 +159,7 @@ func (c *Client) DeleteVersion(ctx context.Context, versionID uint64) error {
 	}
 
 	// 5. Save updated metadata first (Atomic write guarantee)
-	newPbBytes, err := proto.Marshal(&metadata)
+	newPbBytes, err := proto.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated metadata: %w", err)
 	}
@@ -166,8 +169,13 @@ func (c *Client) DeleteVersion(ctx context.Context, versionID uint64) error {
 		return fmt.Errorf("failed to write updated .tsync metadata file: %w", err)
 	}
 
-	// 6. Delete the orphaned file-part objects from storage
+	// 6. Delete the orphaned file-part objects from storage (best effort; GC retries leftovers).
+	// Malformed keys in damaged metadata have no part object and are skipped.
 	for _, key := range keysToDelete {
+		if !fileKeyRegex.MatchString(key) {
+			log.Printf("[TSYNC WARNING] Skipping part deletion for malformed file key %q", key)
+			continue
+		}
 		partKey := fmt.Sprintf("%s/%s", key[0:2], key)
 		_ = c.store.Delete(ctx, partKey)
 	}
@@ -184,52 +192,52 @@ func walkCollect(treeHash string, trees map[string]*tsyncv2.TreeNode, liveTrees 
 
 	node, exists := trees[treeHash]
 	if !exists {
-		return fmt.Errorf("tree node %s not found in metadata trees map", treeHash)
+		return fmt.Errorf("%w: tree node %s not found in metadata trees map", ErrCorruptMetadata, treeHash)
 	}
 
 	// Verify tree node hash matches its key
 	marshaled, err := proto.MarshalOptions{Deterministic: true}.Marshal(node)
 	if err != nil {
-		return fmt.Errorf("failed to marshal tree node: %w", err)
+		return fmt.Errorf("%w: failed to marshal tree node: %w", ErrCorruptMetadata, err)
 	}
 	h := sha256.New()
 	h.Write(marshaled)
 	computedHash := hex.EncodeToString(h.Sum(nil))
 	if computedHash != treeHash {
-		return fmt.Errorf("tree node hash mismatch: map key is %s, but computed hash is %s", treeHash, computedHash)
+		return fmt.Errorf("%w: tree node hash mismatch: map key is %s, but computed hash is %s", ErrCorruptMetadata, treeHash, computedHash)
 	}
 
 	// Verify entries sorting
 	var prevName string
 	for i, entry := range node.Entries {
 		if i > 0 && entry.Name <= prevName {
-			return fmt.Errorf("tree node %s is not sorted: %q comes after %q", treeHash, entry.Name, prevName)
+			return fmt.Errorf("%w: tree node %s is not sorted: %q comes after %q", ErrCorruptMetadata, treeHash, entry.Name, prevName)
 		}
 		prevName = entry.Name
 	}
 
 	for _, entry := range node.Entries {
 		if err := validateName(entry.Name); err != nil {
-			return fmt.Errorf("invalid name %q in tree entry: %w", entry.Name, err)
+			return fmt.Errorf("%w: invalid name %q in tree entry: %w", ErrCorruptMetadata, entry.Name, err)
 		}
 
 		switch n := entry.Node.(type) {
 		case *tsyncv2.TreeEntry_File:
 			if n.File == nil {
-				return fmt.Errorf("file leaf is nil in entry %s", entry.Name)
+				return fmt.Errorf("%w: file leaf is nil in entry %s", ErrCorruptMetadata, entry.Name)
 			}
 			fileKey := fmt.Sprintf("%08x_%d", n.File.Crc32, n.File.UncompressedSize)
 			liveFiles[fileKey] = true
 		case *tsyncv2.TreeEntry_SubtreeHash:
 			if n.SubtreeHash == "" {
-				return fmt.Errorf("subtree hash is empty in entry %s", entry.Name)
+				return fmt.Errorf("%w: subtree hash is empty in entry %s", ErrCorruptMetadata, entry.Name)
 			}
 			err := walkCollect(n.SubtreeHash, trees, liveTrees, liveFiles)
 			if err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("tree entry %s has no node type set", entry.Name)
+			return fmt.Errorf("%w: tree entry %s has no node type set", ErrCorruptMetadata, entry.Name)
 		}
 	}
 	return nil
@@ -239,18 +247,9 @@ func walkCollect(treeHash string, trees map[string]*tsyncv2.TreeNode, liveTrees 
 // It cleans up orphaned TreeNodes and FileRecords from the metadata file itself,
 // and deletes any file-part objects in storage that are not referenced in the metadata.
 func (c *Client) GC(ctx context.Context) error {
-	pbBytes, err := c.store.Read(ctx, ".tsync")
+	metadata, err := loadMetadata(ctx, c.store)
 	if err != nil {
-		return fmt.Errorf("failed to read metadata: %w", err)
-	}
-
-	var metadata tsyncv2.BackupMetadata
-	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
-		return fmt.Errorf("failed to parse metadata: %w", err)
-	}
-
-	if metadata.SchemaVersion != 2 {
-		return fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
+		return err
 	}
 
 	// 1. Collect all live trees and file keys
@@ -284,7 +283,7 @@ func (c *Client) GC(ctx context.Context) error {
 	// 4. Save updated metadata if any changes were made
 	if metadataChanged {
 		metadata.LastUpdated = timestamppb.New(time.Now())
-		newPbBytes, err := proto.Marshal(&metadata)
+		newPbBytes, err := proto.Marshal(metadata)
 		if err != nil {
 			return fmt.Errorf("failed to marshal updated metadata: %w", err)
 		}
@@ -307,12 +306,9 @@ func (c *Client) GC(ctx context.Context) error {
 		return fmt.Errorf("failed to list files in storage: %w", err)
 	}
 
-	// Compile regex to match sharded file part keys: e.g. "1a/1a2b3c4d_12345"
-	partRegex := regexp.MustCompile(`^[a-f0-9]{2}/[a-f0-9]{8}_[0-9]+$`)
-
 	for _, f := range allFiles {
 		// Check if the path matches a T-Sync part structure
-		if partRegex.MatchString(f.Name) {
+		if partKeyRegex.MatchString(f.Name) {
 			// Extract key (base name of the path)
 			key := path.Base(f.Name)
 			if !validParts[key] {
@@ -344,43 +340,25 @@ type StoreMetadata struct {
 
 // ReadMetadata reads and parses the .tsync metadata file from storage.
 func (c *Client) ReadMetadata(ctx context.Context) (*StoreMetadata, error) {
-	pbBytes, err := c.store.Read(ctx, ".tsync")
+	metadata, err := loadMetadata(ctx, c.store)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read store metadata: %w", err)
-	}
-
-	var metadata tsyncv2.BackupMetadata
-	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse store metadata: %w", err)
-	}
-
-	if metadata.SchemaVersion != 2 {
-		return nil, fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
+		return nil, err
 	}
 
 	return &StoreMetadata{
 		client:   c,
-		metadata: &metadata,
+		metadata: metadata,
 	}, nil
 }
 
 // Reload refreshes the metadata from the underlying storage.
 func (sm *StoreMetadata) Reload(ctx context.Context) error {
-	pbBytes, err := sm.client.store.Read(ctx, ".tsync")
+	metadata, err := loadMetadata(ctx, sm.client.store)
 	if err != nil {
-		return fmt.Errorf("failed to reload store metadata: %w", err)
+		return err
 	}
 
-	var metadata tsyncv2.BackupMetadata
-	if err := proto.Unmarshal(pbBytes, &metadata); err != nil {
-		return fmt.Errorf("failed to parse reloaded store metadata: %w", err)
-	}
-
-	if metadata.SchemaVersion != 2 {
-		return fmt.Errorf("unsupported schema version %d (expected 2)", metadata.SchemaVersion)
-	}
-
-	sm.metadata = &metadata
+	sm.metadata = metadata
 	return nil
 }
 

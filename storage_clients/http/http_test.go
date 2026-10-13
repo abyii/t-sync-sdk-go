@@ -3,11 +3,11 @@ package http
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -198,8 +198,8 @@ func TestHTTPStorageClient(t *testing.T) {
 
 	// 3. Test GetObjectSize for non-existent file
 	_, err = httpClient.GetObjectSize(ctx, "test-bucket", "missing.txt")
-	if err == nil || !os.IsNotExist(err) {
-		t.Errorf("expected os.ErrNotExist, got %v", err)
+	if !errors.Is(err, storage_clients.ErrNotFound) {
+		t.Errorf("expected storage_clients.ErrNotFound, got %v", err)
 	}
 
 	// 4. Test GetObjectRange with Range Support (Partial Content)

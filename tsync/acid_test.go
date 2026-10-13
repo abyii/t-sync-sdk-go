@@ -230,15 +230,11 @@ func TestTsyncACIDBackupResumeSelfHealing(t *testing.T) {
 		_ = srcStore.Write(context.Background(), fmt.Sprintf("file_%d.txt", i), []byte(fmt.Sprintf("content for file %d", i)))
 	}
 
-	// Use fixed EphPublicKey and EncryptedPassword for consistent retry encryption
-	clearZipPass, _ := GenerateZipCryptoPassword()
-	ephPub, encPass, _ := EncryptPassword(clearZipPass, vmPub[:])
-
+	// Plaintext source: each attempt generates its own pass password. (Pre-encrypted options
+	// are rejected for plaintext sources, see TestBackupRejectsPreEncryptedOptionsWithPlaintextEntries.)
 	bOpts := BackupOptions{
-		KeyID:             "key-1",
-		PublicKeys:        map[string][]byte{"key-1": vmPub[:]},
-		EphPublicKey:      ephPub,
-		EncryptedPassword: encPass,
+		KeyID:      "key-1",
+		PublicKeys: map[string][]byte{"key-1": vmPub[:]},
 	}
 
 	// 1. First Backup attempt fails halfway (after 7 files)

@@ -25,7 +25,7 @@ func GenerateZipCryptoPassword() (string, error) {
 // Returns the ephemeral public key (32 bytes) and the encrypted password (24-byte nonce + ciphertext + 16-byte Poly1305 tag).
 func EncryptPassword(password string, vmPubKeySlice []byte) (ephPubKey []byte, encryptedPassword []byte, err error) {
 	if len(vmPubKeySlice) != 32 {
-		return nil, nil, fmt.Errorf("invalid VM public key length: expected 32 bytes, got %d", len(vmPubKeySlice))
+		return nil, nil, fmt.Errorf("%w: invalid VM public key length: expected 32 bytes, got %d", ErrInvalidOptions, len(vmPubKeySlice))
 	}
 
 	var vmPubKey [32]byte
@@ -56,13 +56,13 @@ func EncryptPassword(password string, vmPubKeySlice []byte) (ephPubKey []byte, e
 // DecryptPassword decrypts the encrypted ZIP password using the VM's private key and the ephemeral public key.
 func DecryptPassword(encryptedPassword []byte, ephPubKeySlice []byte, vmPrivKeySlice []byte) (string, error) {
 	if len(ephPubKeySlice) != 32 {
-		return "", fmt.Errorf("invalid ephemeral public key length: expected 32 bytes, got %d", len(ephPubKeySlice))
+		return "", fmt.Errorf("%w: invalid ephemeral public key length: expected 32 bytes, got %d", ErrDecryptionFailed, len(ephPubKeySlice))
 	}
 	if len(vmPrivKeySlice) != 32 {
-		return "", fmt.Errorf("invalid VM private key length: expected 32 bytes, got %d", len(vmPrivKeySlice))
+		return "", fmt.Errorf("%w: invalid VM private key length: expected 32 bytes, got %d", ErrInvalidOptions, len(vmPrivKeySlice))
 	}
 	if len(encryptedPassword) < 24+16 {
-		return "", fmt.Errorf("invalid encrypted password length: must be at least 40 bytes (24 nonce + 16 tag), got %d", len(encryptedPassword))
+		return "", fmt.Errorf("%w: invalid encrypted password length: must be at least 40 bytes (24 nonce + 16 tag), got %d", ErrDecryptionFailed, len(encryptedPassword))
 	}
 
 	var ephPubKey [32]byte
@@ -81,7 +81,7 @@ func DecryptPassword(encryptedPassword []byte, ephPubKeySlice []byte, vmPrivKeyS
 	// 3. Decrypt using NaCl Box
 	decrypted, ok := box.Open(nil, ciphertext, &nonce, &ephPubKey, &vmPrivKey)
 	if !ok {
-		return "", fmt.Errorf("failed to decrypt password: NaCl Box decryption failed (key mismatch or corrupted data)")
+		return "", fmt.Errorf("%w: NaCl Box could not open the encrypted password (key mismatch or corrupted data)", ErrDecryptionFailed)
 	}
 
 	return string(decrypted), nil

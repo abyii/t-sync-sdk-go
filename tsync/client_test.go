@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"io"
+	"strconv"
 	"testing"
 	"time"
 
+	tsyncv2 "github.com/abyii/t-sync-sdk-go/v2/gen/go/com/github/abyii/tsync/v2"
 	zip "github.com/abyii/zip-xxh3"
 	"golang.org/x/crypto/nacl/box"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestZipFileSourceAndLoadStoreInfo(t *testing.T) {
@@ -164,5 +169,78 @@ func TestStoreMetadataWrapper(t *testing.T) {
 	latest = sm.LatestVersion()
 	if latest.Label != "second-run" {
 		t.Errorf("expected reloaded latest label to be 'second-run', got %q", latest.Label)
+	}
+}
+
+func TestListVersionsErrorClassification(t *testing.T) {
+	ctx := context.Background()
+
+	missing := &hookStorage{Storage: NewMemStorage(), read: func(context.Context, string) ([]byte, error) {
+		return nil, fmt.Errorf("provider said: %w", ErrNotFound)
+	}}
+	if vs, err := NewClient(missing).ListVersions(ctx); err != nil || vs != nil {
+		t.Fatalf("missing .tsync: expected nil, nil; got %v, %v", vs, err)
+	}
+
+	failing := &hookStorage{Storage: NewMemStorage(), read: func(context.Context, string) ([]byte, error) {
+		return nil, errInjected
+	}}
+	if _, err := NewClient(failing).ListVersions(ctx); !errors.Is(err, errInjected) {
+		t.Fatalf("expected read failure to propagate, got %v", err)
+	}
+
+	corrupt := NewMemStorage()
+	_ = corrupt.Write(ctx, ".tsync", []byte{0xFF, 0xFF, 0xFF})
+	if _, err := NewClient(corrupt).ListVersions(ctx); !errors.Is(err, ErrCorruptMetadata) {
+		t.Fatalf("expected ErrCorruptMetadata, got %v", err)
+	}
+
+	future := NewMemStorage()
+	b, _ := proto.Marshal(&tsyncv2.BackupMetadata{SchemaVersion: 3})
+	_ = future.Write(ctx, ".tsync", b)
+	_, err := NewClient(future).ListVersions(ctx)
+	var schemaErr *UnsupportedSchemaError
+	if !errors.Is(err, ErrUnsupportedSchema) || !errors.As(err, &schemaErr) || schemaErr.Version != 3 {
+		t.Fatalf("expected *UnsupportedSchemaError{3}, got %v", err)
+	}
+}
+
+func TestClientVersionAndTreeErrors(t *testing.T) {
+	ctx := context.Background()
+	fx := newRestoreFixture(t, testFiles(), nil)
+	c := NewClient(fx.store)
+
+	if _, err := c.ListFiles(ctx, fx.version+1); !errors.Is(err, ErrVersionNotFound) {
+		t.Fatalf("ListFiles: expected ErrVersionNotFound, got %v", err)
+	}
+	if err := c.DeleteVersion(ctx, fx.version+1); !errors.Is(err, ErrVersionNotFound) {
+		t.Fatalf("DeleteVersion: expected ErrVersionNotFound, got %v", err)
+	}
+
+	md := fx.metadata(t)
+	root := md.Versions[strconv.FormatUint(fx.version, 10)].RootTreeHash
+	delete(md.Trees, root)
+	fx.saveMetadata(t, md)
+	if _, err := c.ListFiles(ctx, fx.version); !errors.Is(err, ErrCorruptMetadata) {
+		t.Fatalf("ListFiles: expected ErrCorruptMetadata for missing tree, got %v", err)
+	}
+	if err := c.GC(ctx); !errors.Is(err, ErrCorruptMetadata) {
+		t.Fatalf("GC: expected ErrCorruptMetadata for missing tree, got %v", err)
+	}
+}
+
+func TestDeleteVersionMalformedFileKeyDoesNotPanic(t *testing.T) {
+	ctx := context.Background()
+	fx := newRestoreFixture(t, testFiles(), nil)
+	md := fx.metadata(t)
+	md.Files["x"] = &tsyncv2.FileRecord{} // damaged, orphaned record with a too-short key
+	fx.saveMetadata(t, md)
+
+	if err := NewClient(fx.store).DeleteVersion(ctx, fx.version); err != nil {
+		t.Fatalf("DeleteVersion: %v", err)
+	}
+	after := fx.metadata(t)
+	if len(after.Versions) != 0 || len(after.Files) != 0 {
+		t.Fatalf("expected empty store after deleting the only version, got %d versions, %d files", len(after.Versions), len(after.Files))
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -96,7 +97,7 @@ func TestProgressReportingAndDiskSpace(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("expected restore to fail due to insufficient disk space, but it succeeded")
-	} else if !bytes.Contains([]byte(err.Error()), []byte("insufficient disk space")) {
+	} else if !errors.Is(err, ErrInsufficientDiskSpace) {
 		t.Errorf("expected insufficient disk space error, got: %v", err)
 	}
 

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"strings"
+	"errors"
 	"testing"
 
 	"golang.org/x/crypto/nacl/box"
@@ -31,8 +31,8 @@ func TestTsyncValidationOptions_RSA_PublicKey_Rejected(t *testing.T) {
 		t.Fatalf("expected Backup to reject 256-byte RSA public key, but got nil error")
 	}
 
-	if !strings.Contains(err.Error(), "expected 32 bytes") {
-		t.Fatalf("expected error message to mention 'expected 32 bytes', got: %v", err)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("expected ErrInvalidOptions, got: %v", err)
 	}
 }
 
@@ -59,8 +59,8 @@ func TestTsyncValidationOptions_RSA_EphPublicKey_Rejected(t *testing.T) {
 		t.Fatalf("expected Backup to reject 256-byte EphPublicKey, but got nil error")
 	}
 
-	if !strings.Contains(err.Error(), "expected 32 bytes") {
-		t.Fatalf("expected error to mention 'expected 32 bytes', got: %v", err)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("expected ErrInvalidOptions, got: %v", err)
 	}
 }
 
@@ -87,8 +87,8 @@ func TestTsyncValidationOptions_Invalid_EncryptedPassword_Rejected(t *testing.T)
 		t.Fatalf("expected Backup to reject short EncryptedPassword (< 40 bytes), but got nil error")
 	}
 
-	if !strings.Contains(err.Error(), "at least 40 bytes") {
-		t.Fatalf("expected error to mention 'at least 40 bytes', got: %v", err)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("expected ErrInvalidOptions, got: %v", err)
 	}
 }
 
@@ -112,8 +112,8 @@ func TestTsyncValidationOptions_Invalid_CompressionLevel_Rejected(t *testing.T) 
 		t.Fatalf("expected Backup to reject invalid compression level 10, but got nil error")
 	}
 
-	if !strings.Contains(err.Error(), "between -1 and 9") {
-		t.Fatalf("expected error to mention 'between -1 and 9', got: %v", err)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("expected ErrInvalidOptions, got: %v", err)
 	}
 }
 
@@ -133,8 +133,8 @@ func TestTsyncValidationOptions_RSA_PrivateKey_Rejected(t *testing.T) {
 		t.Fatalf("expected Restore to reject 256-byte RSA private key, but got nil error")
 	}
 
-	if !strings.Contains(err.Error(), "expected 32 bytes") {
-		t.Fatalf("expected error to mention 'expected 32 bytes', got: %v", err)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("expected ErrInvalidOptions, got: %v", err)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestTsyncValidationOptions_Missing_RestoreDestination_Rejected(t *testing.T
 		t.Fatalf("expected Restore to fail when neither ZipWriter nor ExtractDir is set, but got nil error")
 	}
 
-	if !strings.Contains(err.Error(), "either ZipWriter or ExtractDir must be set") {
-		t.Fatalf("expected error to mention 'either ZipWriter or ExtractDir must be set', got: %v", err)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("expected ErrInvalidOptions, got: %v", err)
 	}
 }

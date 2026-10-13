@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"math/big"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +39,7 @@ func (m *MemStorage) Read(ctx context.Context, path string) ([]byte, error) {
 	defer m.mu.RUnlock()
 	data, ok := m.files[path]
 	if !ok {
-		return nil, os.ErrNotExist
+		return nil, memNotFound(path)
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
@@ -83,22 +83,41 @@ func (m *MemStorage) OpenReader(ctx context.Context, path string) (io.ReadCloser
 	defer m.mu.RUnlock()
 	data, ok := m.files[path]
 	if !ok {
-		return nil, os.ErrNotExist
+		return nil, memNotFound(path)
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 type memWriter struct {
-	buf bytes.Buffer
-	cb  func([]byte) error
+	buf    bytes.Buffer
+	cb     func([]byte) error
+	closed bool
 }
 
 func (w *memWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, ErrWriterClosed
+	}
 	return w.buf.Write(p)
 }
 
 func (w *memWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
 	return w.cb(w.buf.Bytes())
+}
+
+// Abort discards the buffered data without committing an object.
+func (w *memWriter) Abort() error {
+	w.closed = true
+	w.buf.Reset()
+	return nil
+}
+
+func memNotFound(path string) error {
+	return fmt.Errorf("%w: %s", ErrNotFound, path)
 }
 
 func (m *MemStorage) OpenWriter(ctx context.Context, path string) (io.WriteCloser, error) {
@@ -114,7 +133,7 @@ func (m *MemStorage) Size(ctx context.Context, path string) (int64, error) {
 	defer m.mu.RUnlock()
 	data, ok := m.files[path]
 	if !ok {
-		return 0, os.ErrNotExist
+		return 0, memNotFound(path)
 	}
 	return int64(len(data)), nil
 }
@@ -124,7 +143,7 @@ func (m *MemStorage) ReadRange(ctx context.Context, path string, offset, length 
 	defer m.mu.RUnlock()
 	data, ok := m.files[path]
 	if !ok {
-		return nil, os.ErrNotExist
+		return nil, memNotFound(path)
 	}
 
 	if offset > int64(len(data)) {

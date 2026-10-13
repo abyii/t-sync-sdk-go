@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -464,8 +465,8 @@ func TestTsyncEmptyFoldersBackupAndRestore(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected backup to fail due to directory traversal '..', but it succeeded")
 		}
-		if !strings.Contains(err.Error(), "directory traversal sentinel \"..\"") {
-			t.Errorf("expected error to mention traversal sentinel, got: %v", err)
+		if !errors.Is(err, ErrInvalidName) {
+			t.Errorf("expected ErrInvalidName, got: %v", err)
 		}
 	})
 

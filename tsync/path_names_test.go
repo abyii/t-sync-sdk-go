@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -303,8 +304,8 @@ func TestBackslashNamesExtractDir(t *testing.T) {
 			t.Fatalf("restore wrote outside ExtractDir")
 		}
 		if runtime.GOOS == "windows" {
-			if rErr == nil || !strings.Contains(rErr.Error(), "directory traversal") {
-				t.Fatalf("expected directory traversal error on Windows, got %v", rErr)
+			if !errors.Is(rErr, ErrUnsafePath) {
+				t.Fatalf("expected ErrUnsafePath on Windows, got %v", rErr)
 			}
 			return
 		}
